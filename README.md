@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="version 0.1.1" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.2-blue" alt="version 0.1.2" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
   <img src="https://img.shields.io/badge/tests-77%20passing-brightgreen" alt="77 tests" />
   <img src="https://img.shields.io/badge/platform-WSL%20%7C%20Linux%20%7C%20Remote--WSL-informational" alt="platform" />
@@ -57,9 +57,11 @@ AI 改代码不应是黑盒。WSLDeck 在变更进入主工作区前提供 **Cha
 ### 环境要求
 
 - VS Code **1.90+**
-- **Linux/WSL 作为 Agent 执行环境**（推荐 Remote - WSL；或 Windows + WSL 桥接）
-- [Codex CLI](https://github.com/openai/codex) 和/或 [Cursor CLI](https://cursor.com/docs/cli) 已加入 Linux `PATH`
-- 已打开文件夹作为工作区（Remote-WSL 时使用 WSL 路径）
+- **Linux/WSL 作为 Agent 执行环境**
+  - **Remote-WSL**（推荐）：扩展与 CLI 均在 WSL 内
+  - **Windows 本机 VS Code**：需 WSL + **打开文件夹**；Codex/Cursor 经 `wsl.exe --cd` 桥接执行（与 WSLDeck WSL 终端同一套逻辑）
+- [Codex CLI](https://github.com/openai/codex) 和/或 [Cursor CLI](https://cursor.com/docs/cli) 已加入 **WSL 内** `PATH`
+- 已打开文件夹作为工作区（Windows 路径如 `C:\project` 会自动映射为 `/mnt/c/project`）
 
 ### 从源码安装
 
@@ -77,7 +79,7 @@ npm run compile
 ```bash
 npm test
 npx vsce package
-# 在扩展视图 → ··· → 从 VSIX 安装 → 选择 wsldeck-extension-0.1.1.vsix
+# 在扩展视图 → ··· → 从 VSIX 安装 → 选择 wsldeck-extension-0.1.2.vsix
 ```
 
 ### 首次使用

@@ -1,6 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { AgentRawLog } from '../../agentRawLog';
+import { spawnLinuxCli, type LinuxCliContext } from '../../../workspace/linuxCliBridge';
 
 type Pending = {
 	resolve: (value: unknown) => void;
@@ -14,45 +14,38 @@ export type AcpNotificationHandler = (
 ) => void;
 
 export type AcpStartOptions = {
-	cwd?: string;
-	env?: NodeJS.ProcessEnv;
+	cliCtx: LinuxCliContext;
+	argv: string[];
+	env?: Record<string, string | undefined>;
 };
 
 /**
  * Minimal JSON-RPC 2.0 client over agent acp stdio (newline-delimited).
  */
 export class CursorAcpClient {
-	private child?: ChildProcessWithoutNullStreams;
+	private child?: import('node:child_process').ChildProcessWithoutNullStreams;
 	private nextId = 1;
 	private readonly pending = new Map<number, Pending>();
 	private onNotification?: AcpNotificationHandler;
 
-	constructor(
-		private readonly executable: string,
-		private readonly args: string[] = ['acp'],
-		private readonly log?: AgentRawLog,
-	) {}
+	constructor(private readonly log?: AgentRawLog) {}
 
 	setNotificationHandler(handler: AcpNotificationHandler): void {
 		this.onNotification = handler;
 	}
 
-	async start(options?: AcpStartOptions | string): Promise<void> {
+	async start(options: AcpStartOptions): Promise<void> {
 		if (this.child) {
 			return;
 		}
-		const opts: AcpStartOptions =
-			typeof options === 'string' ? { cwd: options } : (options ?? {});
-		const child = spawn(this.executable, this.args, {
-			cwd: opts.cwd,
-			env: opts.env ?? process.env,
-			stdio: ['pipe', 'pipe', 'pipe'],
-		});
+		const child = spawnLinuxCli(options.cliCtx, options.argv, {
+			env: options.env,
+		}) as import('node:child_process').ChildProcessWithoutNullStreams;
 		this.child = child;
 
-		this.log?.section(`cursor acp · ${this.executable} ${this.args.join(' ')}`);
-		if (opts.cwd) {
-			this.log?.line('cursor', '--', `spawn cwd=${opts.cwd}`);
+		this.log?.section(`cursor acp · ${options.argv.join(' ')}`);
+		if (options.cliCtx.linuxCwd) {
+			this.log?.line('cursor', '--', `linux cwd=${options.cliCtx.linuxCwd}`);
 		}
 
 		const rl = createInterface({ input: child.stdout });

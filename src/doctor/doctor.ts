@@ -2,6 +2,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import type { AgentSessionManager } from '../agent/agentSessionManager';
+import {
+	formatLinuxCliDetail,
+	mergeLinuxCliContext,
+	resolveLinuxCommand,
+	runLinuxCli,
+} from '../workspace/linuxCliBridge';
 import { getWorkspaceContext, NO_WORKSPACE_FOLDER_HINT } from '../workspace/workspaceContext';
 
 const execFileAsync = promisify(execFile);
@@ -20,25 +26,35 @@ export interface DoctorReport {
 	text: string;
 }
 
-async function which(command: string): Promise<string | undefined> {
-	try {
-		const { stdout } = await execFileAsync('bash', ['-lc', `command -v ${shellQuote(command)}`], {
-			timeout: 5_000,
-		});
-		const path = stdout.trim();
-		return path.length > 0 ? path : undefined;
-	} catch {
+async function resolveWslExecutable(): Promise<string | undefined> {
+	if (process.platform === 'win32') {
+		try {
+			const { stdout } = await execFileAsync('where', ['wsl.exe'], {
+				timeout: 5_000,
+				windowsHide: true,
+			});
+			const line = stdout.trim().split(/\r?\n/)[0]?.trim();
+			return line || 'wsl.exe';
+		} catch {
+			return undefined;
+		}
+	}
+	return resolveLinuxCommand({ host: 'local-linux' }, 'wsl');
+}
+
+async function runVersionViaBridge(
+	cliCtx: ReturnType<typeof mergeLinuxCliContext>,
+	command: string,
+	args: string[],
+): Promise<string | undefined> {
+	const path = await resolveLinuxCommand(cliCtx, command);
+	if (!path) {
 		return undefined;
 	}
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-async function runVersion(command: string, args: string[]): Promise<string | undefined> {
 	try {
-		const { stdout, stderr } = await execFileAsync(command, args, { timeout: 5_000 });
+		const { stdout, stderr } = await runLinuxCli(cliCtx, [command, ...args], {
+			timeout: 5_000,
+		});
 		const text = (stdout || stderr).trim().split('\n')[0] ?? '';
 		return text || undefined;
 	} catch {
@@ -70,6 +86,8 @@ function formatReport(checks: DoctorCheck[]): string {
 
 export async function runDoctor(sessions?: AgentSessionManager): Promise<DoctorReport> {
 	const checks: DoctorCheck[] = [];
+	const ctx = getWorkspaceContext();
+	const cliCtx = mergeLinuxCliContext(ctx);
 
 	const folders = vscode.workspace.workspaceFolders;
 	if (folders && folders.length > 0) {
@@ -86,24 +104,34 @@ export async function runDoctor(sessions?: AgentSessionManager): Promise<DoctorR
 		});
 	}
 
-	const gitPath = await which('git');
-	if (gitPath) {
-		const version = await runVersion('git', ['--version']);
+	if (cliCtx.linuxCwd || cliCtx.host !== 'local-windows') {
+		const gitPath = await resolveLinuxCommand(cliCtx, 'git');
+		if (gitPath) {
+			const version = await runVersionViaBridge(cliCtx, 'git', ['--version']);
+			checks.push({
+				name: 'Git',
+				status: 'ok',
+				detail: version?.replace(/^git version\s+/i, '') ?? formatLinuxCliDetail(gitPath, cliCtx),
+			});
+		} else {
+			checks.push({ name: 'Git', status: 'fail', detail: 'not found in Linux environment' });
+		}
+	} else {
 		checks.push({
 			name: 'Git',
-			status: 'ok',
-			detail: version?.replace(/^git version\s+/i, '') ?? gitPath,
+			status: 'warn',
+			detail: '打开工作区后在 WSL 内检测',
 		});
-	} else {
-		checks.push({ name: 'Git', status: 'fail', detail: 'not found' });
 	}
 
-	const wslPath = await which('wsl.exe');
-	const wslAlt = wslPath ?? (await which('wsl'));
+	const wslAlt = await resolveWslExecutable();
 	if (wslAlt) {
 		let distro = 'available';
 		try {
-			const { stdout } = await execFileAsync(wslAlt, ['-l', '-q'], { timeout: 5_000 });
+			const { stdout } = await execFileAsync(wslAlt, ['-l', '-q'], {
+				timeout: 5_000,
+				windowsHide: true,
+			});
 			const first = stdout
 				.replace(/\0/g, '')
 				.split(/\r?\n/)
@@ -137,26 +165,36 @@ export async function runDoctor(sessions?: AgentSessionManager): Promise<DoctorR
 				detail: availability.detail,
 			});
 		}
-	} else {
+	} else if (cliCtx.linuxCwd || cliCtx.host !== 'local-windows') {
 		const codexExe = config.get<string>('codex.executable', 'codex');
 		const cursorExe = config.get<string>('cursor.executable', 'agent');
 
-		const codexPath = await which(codexExe);
+		const codexPath = await resolveLinuxCommand(cliCtx, codexExe);
 		checks.push(
 			codexPath
-				? { name: 'Codex CLI', status: 'ok', detail: codexPath }
-				: { name: 'Codex CLI', status: 'warn', detail: `"${codexExe}" not found` },
+				? { name: 'Codex CLI', status: 'ok', detail: formatLinuxCliDetail(codexPath, cliCtx) }
+				: { name: 'Codex CLI', status: 'warn', detail: `"${codexExe}" not found in Linux environment` },
 		);
 
-		const cursorPath = await which(cursorExe);
+		const cursorPath = await resolveLinuxCommand(cliCtx, cursorExe);
 		checks.push(
 			cursorPath
-				? { name: 'Cursor CLI', status: 'ok', detail: cursorPath }
-				: { name: 'Cursor CLI', status: 'warn', detail: `"${cursorExe}" not found` },
+				? { name: 'Cursor CLI', status: 'ok', detail: formatLinuxCliDetail(cursorPath, cliCtx) }
+				: { name: 'Cursor CLI', status: 'warn', detail: `"${cursorExe}" not found in Linux environment` },
 		);
+	} else {
+		checks.push({
+			name: 'Codex CLI',
+			status: 'warn',
+			detail: '打开工作区后在 WSL 内检测',
+		});
+		checks.push({
+			name: 'Cursor CLI',
+			status: 'warn',
+			detail: '打开工作区后在 WSL 内检测',
+		});
 	}
 
-	const ctx = getWorkspaceContext();
 	if (ctx.linuxCwd) {
 		const hostLabel = ctx.host;
 		const mapped =

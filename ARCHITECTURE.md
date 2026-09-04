@@ -180,7 +180,7 @@ ShadowWorkspaceIsolation（当前实现）
 
 | 架构层 | 源码 |
 |--------|------|
-| Runtime Bridge | [`src/workspace/wslPathResolver.ts`](src/workspace/wslPathResolver.ts)、[`src/workspace/workspaceContext.ts`](src/workspace/workspaceContext.ts)、[`src/terminal/wslTerminalProfile.ts`](src/terminal/wslTerminalProfile.ts)、[`src/terminal/terminalService.ts`](src/terminal/terminalService.ts) |
+| Runtime Bridge | [`src/workspace/linuxCliBridge.ts`](src/workspace/linuxCliBridge.ts)、[`src/workspace/wslPathResolver.ts`](src/workspace/wslPathResolver.ts)、[`src/workspace/workspaceContext.ts`](src/workspace/workspaceContext.ts)、[`src/terminal/wslTerminalProfile.ts`](src/terminal/wslTerminalProfile.ts)、[`src/terminal/terminalService.ts`](src/terminal/terminalService.ts) |
 | Agent Provider | [`src/agent/providers/providerFactory.ts`](src/agent/providers/providerFactory.ts)、[`src/agent/providers/codex/`](src/agent/providers/codex/)、[`src/agent/providers/cursor/`](src/agent/providers/cursor/) |
 | 会话与编排 | [`src/agent/agentSessionManager.ts`](src/agent/agentSessionManager.ts)、[`src/state/sessionStore.ts`](src/state/sessionStore.ts) |
 | Change Engine | [`src/change/changeTracker.ts`](src/change/changeTracker.ts)、[`src/change/changeRevisions.ts`](src/change/changeRevisions.ts)、[`src/change/changeActions.ts`](src/change/changeActions.ts)、[`src/change/baselineOverlay.ts`](src/change/baselineOverlay.ts) |

@@ -5,6 +5,21 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.2] - 2026-09-04
+
+Windows 本机 VS Code 下 Codex/Cursor CLI 经 WSL 桥接执行。
+
+### 新增
+
+- **Linux CLI 桥接** — [`linuxCliBridge.ts`](src/workspace/linuxCliBridge.ts)：`local-windows` 时经 `wsl.exe --cd` 启动 Codex/Cursor（与 WSL 终端同一套路径/distro 逻辑）
+
+### 修复
+
+- Windows 本机 VS Code 无法发现 WSL 内 `codex` / `agent`、模型列表为空
+- Doctor 在 WSL 桥接模式下显示 `(via wsl.exe)` 详情
+
+[0.1.2]: https://github.com/ADaozz/wsl_deck_extension/releases/tag/v0.1.2
+
 ## [0.1.1] - 2026-09-04
 
 补丁版 — 文档定位调整与未打开工作区时的体验修复。

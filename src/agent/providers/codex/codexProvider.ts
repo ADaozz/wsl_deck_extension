@@ -1,5 +1,3 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type {
 	AgentAvailability,
 	AgentModelInfo,
@@ -10,8 +8,22 @@ import type {
 import type { AgentEvent } from '../../agentEvents';
 import type { AgentRawLog } from '../../agentRawLog';
 import { createAgentSession, type AgentSession } from '../../agentSession';
-import { modelsFromConfigFallback, parseCodexDebugModelsJson, parseCodexModelCatalog, type CodexModelCatalogEntry, codexReasoningLevelsForModel } from '../../modelCatalog';
+import {
+	modelsFromConfigFallback,
+	parseCodexDebugModelsJson,
+	parseCodexModelCatalog,
+	type CodexModelCatalogEntry,
+	codexReasoningLevelsForModel,
+} from '../../modelCatalog';
 import { reasoningToModelOption } from '../../sessionConfigSlash';
+import {
+	formatLinuxCliDetail,
+	mergeLinuxCliContext,
+	resolveLinuxCommand,
+	runLinuxCli,
+	type LinuxCliContext,
+} from '../../../workspace/linuxCliBridge';
+import { getWorkspaceContext } from '../../../workspace/workspaceContext';
 import {
 	codexItemActivityGroup,
 	codexItemCompletedOk,
@@ -22,22 +34,8 @@ import {
 } from './codexEvents';
 import { buildCodexExecArgs, runCodexExec } from './codexProcess';
 
-const execFileAsync = promisify(execFile);
-
 function newId(prefix: string): string {
 	return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-async function which(command: string): Promise<string | undefined> {
-	try {
-		const { stdout } = await execFileAsync('bash', ['-lc', `command -v ${shellQuote(command)}`], {
-			timeout: 5_000,
-		});
-		const path = stdout.trim();
-		return path.length > 0 ? path : undefined;
-	} catch {
-		return undefined;
-	}
 }
 
 function shellQuote(value: string): string {
@@ -58,21 +56,43 @@ export class CodexProvider implements AgentProvider {
 		return this.getSetting('codex.executable', 'codex');
 	}
 
-	async detect(): Promise<AgentAvailability> {
-		const exe = this.executable();
-		const path = await which(exe);
-		if (!path) {
-			return { available: false, cliPresent: false, detail: `"${exe}" not found` };
-		}
-		return { available: true, cliPresent: true, detail: path };
+	private cliContext(context?: AgentSessionContext): LinuxCliContext {
+		const workspace = getWorkspaceContext();
+		return mergeLinuxCliContext(workspace, {
+			linuxCwd:
+				context?.linuxCwd ??
+				context?.workspaceFolder ??
+				context?.acpSpawnCwd ??
+				workspace.linuxCwd,
+		});
 	}
 
-	async listModels(_context: AgentSessionContext): Promise<AgentModelInfo[]> {
+	async detect(): Promise<AgentAvailability> {
 		const exe = this.executable();
-		const path = await which(exe);
-		if (path) {
-			try {
-				const { stdout } = await execFileAsync(path, ['debug', 'models'], {
+		const cliCtx = this.cliContext();
+		try {
+			const path = await resolveLinuxCommand(cliCtx, exe);
+			if (!path) {
+				return { available: false, cliPresent: false, detail: `"${exe}" not found` };
+			}
+			return {
+				available: true,
+				cliPresent: true,
+				detail: formatLinuxCliDetail(path, cliCtx),
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return { available: false, cliPresent: false, detail: message };
+		}
+	}
+
+	async listModels(context: AgentSessionContext): Promise<AgentModelInfo[]> {
+		const exe = this.executable();
+		const cliCtx = this.cliContext(context);
+		try {
+			const path = await resolveLinuxCommand(cliCtx, exe);
+			if (path) {
+				const { stdout } = await runLinuxCli(cliCtx, [exe, 'debug', 'models'], {
 					timeout: 30_000,
 					maxBuffer: 8 * 1024 * 1024,
 				});
@@ -85,9 +105,9 @@ export class CodexProvider implements AgentProvider {
 				if (parsed.length > 0) {
 					return parsed;
 				}
-			} catch {
-				// fall through
 			}
+		} catch {
+			// fall through to settings fallback
 		}
 		return modelsFromConfigFallback(
 			(section) => this.getSetting<string[]>(section, []),
@@ -115,8 +135,26 @@ export class CodexProvider implements AgentProvider {
 		options?: SendPromptOptions,
 	): AsyncIterable<AgentEvent> {
 		const exe = this.executable();
-		const path = await which(exe);
-		if (!path) {
+		const cliCtx = this.cliContext({
+			linuxCwd: session.workspaceCwd,
+			workspaceFolder: session.workspaceCwd,
+		});
+
+		let codexPath: string | undefined;
+		try {
+			codexPath = await resolveLinuxCommand(cliCtx, exe);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			yield {
+				type: 'session.failed',
+				sessionId: session.id,
+				timestamp: Date.now(),
+				message,
+			};
+			return;
+		}
+
+		if (!codexPath) {
 			yield {
 				type: 'session.failed',
 				sessionId: session.id,
@@ -146,12 +184,16 @@ export class CodexProvider implements AgentProvider {
 			cwd: workspaceCwd,
 			resumeId: session.providerSessionId,
 		});
+		const argv = [exe, ...args];
 
 		this.log?.section(`codex exec · session ${session.id}`);
 		this.log?.show?.(true);
-		this.log?.line('codex', '--', `${path} ${args.map(shellQuote).join(' ')}`);
+		this.log?.line('codex', '--', `${codexPath} ${args.map(shellQuote).join(' ')}`);
 		if (workspaceCwd) {
 			this.log?.line('codex', '--', `cwd=${workspaceCwd}`);
+		}
+		if (usesWslBridgeLog(cliCtx)) {
+			this.log?.line('codex', '--', 'via wsl.exe');
 		}
 
 		const queue: AgentEvent[] = [];
@@ -167,9 +209,8 @@ export class CodexProvider implements AgentProvider {
 		};
 
 		const runPromise = runCodexExec({
-			executable: path,
-			args,
-			cwd: workspaceCwd,
+			cliCtx,
+			argv,
 			signal: options?.signal,
 			onStdoutLine: (line) => {
 				this.log?.line('codex', '<<', line);
@@ -346,4 +387,8 @@ export class CodexProvider implements AgentProvider {
 	async dispose(session: AgentSession): Promise<void> {
 		session.status = 'CLOSED';
 	}
+}
+
+function usesWslBridgeLog(ctx: LinuxCliContext): boolean {
+	return ctx.host === 'local-windows';
 }

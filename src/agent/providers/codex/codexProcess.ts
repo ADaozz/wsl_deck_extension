@@ -1,50 +1,27 @@
-import { homedir } from 'node:os';
-import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { spawnLinuxCli, type LinuxCliContext } from '../../../workspace/linuxCliBridge';
 
 export interface SpawnCodexExecOptions {
-	executable: string;
-	args: string[];
-	cwd?: string;
-	env?: NodeJS.ProcessEnv;
+	cliCtx: LinuxCliContext;
+	argv: string[];
 	signal?: AbortSignal;
 	onStdoutLine: (line: string) => void;
 	onStderrLine?: (line: string) => void;
 }
 
 export async function runCodexExec(options: SpawnCodexExecOptions): Promise<number> {
-	const child = spawn(options.executable, options.args, {
-		cwd: options.cwd,
-		env: { ...process.env, HOME: homedir(), ...options.env },
-		stdio: ['pipe', 'pipe', 'pipe'],
-	});
-	child.stdin.end();
+	const child = spawnLinuxCli(options.cliCtx, options.argv, { signal: options.signal });
+	child.stdin?.end();
 
-	const onAbort = () => {
-		child.kill('SIGTERM');
-		setTimeout(() => {
-			if (!child.killed) {
-				child.kill('SIGKILL');
-			}
-		}, 2_000).unref();
-	};
-	if (options.signal) {
-		if (options.signal.aborted) {
-			onAbort();
-		} else {
-			options.signal.addEventListener('abort', onAbort, { once: true });
-		}
-	}
-
-	const out = createInterface({ input: child.stdout });
+	const out = createInterface({ input: child.stdout! });
 	out.on('line', (line) => options.onStdoutLine(line));
 
-	const err = createInterface({ input: child.stderr });
+	const err = createInterface({ input: child.stderr! });
 	err.on('line', (line) => options.onStderrLine?.(line));
 
 	return await new Promise<number>((resolve, reject) => {
 		child.on('error', reject);
-		child.on('close', (code) => resolve(code ?? 1));
+		child.on('close', (code: number | null) => resolve(code ?? 1));
 	});
 }
 
