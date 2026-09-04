@@ -69,9 +69,27 @@ function compactEnv(env?: Record<string, string | undefined>): string[] {
 	return out;
 }
 
+/** Merge resolved Linux agent env with per-invocation overrides. */
+export function mergeCliLaunchEnv(
+	linuxEnv?: Record<string, string | undefined>,
+	extra?: Record<string, string | undefined>,
+): Record<string, string | undefined> | undefined {
+	if (!linuxEnv && !extra) {
+		return undefined;
+	}
+	const merged: Record<string, string | undefined> = { ...linuxEnv, ...extra };
+	for (const key of Object.keys(merged)) {
+		if (merged[key] === undefined || merged[key] === '') {
+			delete merged[key];
+		}
+	}
+	return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 /**
  * Build host launch spec for a Linux argv vector.
  * local-windows → wsl.exe [-d distro] --cd linuxCwd -- [env ...] argv...
+ * Linux process env comes only from linuxEnv/extra — not Windows process.env.
  */
 export function buildLinuxCliLaunch(
 	ctx: LinuxCliContext,
@@ -105,27 +123,44 @@ export function formatLinuxCliDetail(path: string, ctx: LinuxCliContext): string
 	return path;
 }
 
+function commandLookupArgv(name: string): string[] {
+	return ['bash', '-c', `command -v ${shellQuote(name)}`];
+}
+
 export async function resolveLinuxCommand(
 	ctx: LinuxCliContext,
 	command: string,
+	linuxEnv?: Record<string, string | undefined>,
 ): Promise<string | undefined> {
 	const name = command.trim();
 	if (!name) {
 		return undefined;
 	}
 
+	const launchEnv = mergeCliLaunchEnv(linuxEnv);
+
 	try {
 		if (usesWslCliBridge(ctx)) {
-			const launch = buildLinuxCliLaunch(ctx, [
-				'bash',
-				'-lc',
-				`command -v ${shellQuote(name)}`,
-			]);
+			const launch = buildLinuxCliLaunch(ctx, commandLookupArgv(name), launchEnv);
 			const { stdout } = await execFileAsync(launch.executable, launch.args, {
 				timeout: 5_000,
 				windowsHide: true,
 			});
-			const path = stdout.trim();
+			const path = stdout.toString().trim();
+			return path.length > 0 ? path : undefined;
+		}
+
+		if (launchEnv) {
+			const launch = buildLinuxCliLaunch(ctx, commandLookupArgv(name), launchEnv);
+			const spawnOpts: Parameters<typeof execFileAsync>[2] = {
+				timeout: 5_000,
+				env: { ...process.env, ...launchEnv },
+			};
+			if (ctx.linuxCwd) {
+				spawnOpts.cwd = ctx.linuxCwd;
+			}
+			const { stdout } = await execFileAsync(launch.executable, launch.args, spawnOpts);
+			const path = stdout.toString().trim();
 			return path.length > 0 ? path : undefined;
 		}
 
@@ -135,7 +170,7 @@ export async function resolveLinuxCommand(
 				['-lc', `command -v ${shellQuote(name)}`],
 				{ timeout: 5_000 },
 			);
-			const path = stdout.trim();
+			const path = stdout.toString().trim();
 			return path.length > 0 ? path : undefined;
 		}
 
@@ -147,32 +182,53 @@ export async function resolveLinuxCommand(
 				cwd: ctx.linuxCwd,
 			},
 		);
-		const path = stdout.trim();
+		const path = stdout.toString().trim();
 		return path.length > 0 ? path : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
+/** Resolve command to an absolute Linux path and build argv (required for wsl.exe non-login PATH). */
+export async function resolveLinuxArgv(
+	ctx: LinuxCliContext,
+	command: string,
+	args: string[] = [],
+	linuxEnv?: Record<string, string | undefined>,
+): Promise<string[] | undefined> {
+	const resolved = await resolveLinuxCommand(ctx, command, linuxEnv);
+	if (!resolved) {
+		return undefined;
+	}
+	return [resolved, ...args];
+}
+
 export interface RunLinuxCliOptions {
 	timeout?: number;
 	maxBuffer?: number;
+	linuxEnv?: Record<string, string | undefined>;
+	env?: Record<string, string | undefined>;
 }
 
 export async function runLinuxCli(
 	ctx: LinuxCliContext,
 	argv: string[],
 	opts?: RunLinuxCliOptions,
-	env?: Record<string, string | undefined>,
 ): Promise<{ stdout: string; stderr: string }> {
-	const launch = buildLinuxCliLaunch(ctx, argv, env);
+	const launchEnv = mergeCliLaunchEnv(opts?.linuxEnv, opts?.env);
+	const launch = buildLinuxCliLaunch(ctx, argv, launchEnv);
 	const spawnOpts: Parameters<typeof execFileAsync>[2] = {
 		timeout: opts?.timeout ?? 30_000,
 		maxBuffer: opts?.maxBuffer ?? 8 * 1024 * 1024,
 		windowsHide: true,
 	};
-	if (!usesWslCliBridge(ctx) && ctx.linuxCwd) {
-		spawnOpts.cwd = ctx.linuxCwd;
+	if (!usesWslCliBridge(ctx)) {
+		if (launchEnv) {
+			spawnOpts.env = { ...process.env, ...launchEnv };
+		}
+		if (ctx.linuxCwd) {
+			spawnOpts.cwd = ctx.linuxCwd;
+		}
 	}
 	const { stdout, stderr } = await execFileAsync(launch.executable, launch.args, spawnOpts);
 	return { stdout: stdout.toString(), stderr: stderr.toString() };
@@ -180,7 +236,44 @@ export async function runLinuxCli(
 
 export interface SpawnLinuxCliOptions {
 	signal?: AbortSignal;
+	linuxEnv?: Record<string, string | undefined>;
 	env?: Record<string, string | undefined>;
+}
+
+/** Terminate a CLI child (wsl.exe tree on Windows). Idempotent. */
+export function killLinuxCliChild(child: ChildProcess): void {
+	if (child.killed || child.exitCode !== null || child.signalCode !== null) {
+		return;
+	}
+	const pid = child.pid;
+	if (pid === undefined) {
+		return;
+	}
+	if (process.platform === 'win32') {
+		try {
+			spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+				windowsHide: true,
+				stdio: 'ignore',
+			});
+			return;
+		} catch {
+			// fall through to signal kill
+		}
+	}
+	try {
+		child.kill('SIGTERM');
+	} catch {
+		// ignore
+	}
+	setTimeout(() => {
+		if (!child.killed && child.exitCode === null) {
+			try {
+				child.kill('SIGKILL');
+			} catch {
+				// ignore
+			}
+		}
+	}, 2_000).unref();
 }
 
 export function spawnLinuxCli(
@@ -188,25 +281,25 @@ export function spawnLinuxCli(
 	argv: string[],
 	opts?: SpawnLinuxCliOptions,
 ): ChildProcess {
-	const launch = buildLinuxCliLaunch(ctx, argv, opts?.env);
+	const launchEnv = mergeCliLaunchEnv(opts?.linuxEnv, opts?.env);
+	const launch = buildLinuxCliLaunch(ctx, argv, launchEnv);
 	const spawnOpts: SpawnOptions = {
 		stdio: ['pipe', 'pipe', 'pipe'],
 		windowsHide: true,
-		env: { ...process.env, ...opts?.env },
 	};
-	if (!usesWslCliBridge(ctx) && ctx.linuxCwd) {
-		spawnOpts.cwd = ctx.linuxCwd;
+	if (usesWslCliBridge(ctx)) {
+		spawnOpts.env = process.env;
+	} else {
+		spawnOpts.env = launchEnv ? { ...process.env, ...launchEnv } : { ...process.env };
+		if (ctx.linuxCwd) {
+			spawnOpts.cwd = ctx.linuxCwd;
+		}
 	}
 	const child = spawn(launch.executable, launch.args, spawnOpts);
 
 	if (opts?.signal) {
 		const onAbort = () => {
-			child.kill('SIGTERM');
-			setTimeout(() => {
-				if (!child.killed) {
-					child.kill('SIGKILL');
-				}
-			}, 2_000).unref();
+			killLinuxCliChild(child);
 		};
 		if (opts.signal.aborted) {
 			onAbort();

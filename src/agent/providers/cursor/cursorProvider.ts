@@ -41,10 +41,19 @@ import {
 	formatLinuxCliDetail,
 	mergeLinuxCliContext,
 	resolveLinuxCommand,
+	resolveLinuxArgv,
 	runLinuxCli,
 	type LinuxCliContext,
 } from '../../../workspace/linuxCliBridge';
+import {
+	agentEnvForLog,
+	markAgentEnvLogged,
+	resolveLinuxAgentEnv,
+	shouldLogAgentEnv,
+	type LinuxAgentEnv,
+} from '../../../workspace/linuxAgentEnvironment';
 import { getWorkspaceContext } from '../../../workspace/workspaceContext';
+import { toWslLinuxPath } from '../../../workspace/wslPathResolver';
 
 function newId(prefix: string): string {
 	return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -80,53 +89,56 @@ export class CursorProvider implements AgentProvider {
 	) {}
 
 	private shellApiKeyCache?: string;
-	private shellApiKeyPromise?: Promise<string>;
 
-	private async resolveApiKey(): Promise<string> {
+	private resolveSdkApiKey(): string {
 		const configured = this.getSetting('cursor.apiKey', '').trim();
 		if (configured) {
 			return configured;
 		}
-		const env = process.env.CURSOR_API_KEY?.trim();
-		if (env) {
-			return env;
+		return process.env.CURSOR_API_KEY?.trim() ?? '';
+	}
+
+	private async resolveApiKey(cliCtx?: LinuxCliContext): Promise<string> {
+		const sdkKey = this.resolveSdkApiKey();
+		if (sdkKey) {
+			return sdkKey;
 		}
 		if (this.shellApiKeyCache) {
 			return this.shellApiKeyCache;
 		}
-		if (!this.shellApiKeyPromise) {
-			this.shellApiKeyPromise = (async () => {
-				try {
-					const cliCtx = this.cliContext();
-					if (cliCtx.host === 'local-windows' && !cliCtx.linuxCwd) {
-						return '';
-					}
-					const { stdout } = await runLinuxCli(
-						cliCtx,
-						['bash', '-lc', 'printf %s "${CURSOR_API_KEY:-}"'],
-						{ timeout: 5_000 },
-					);
-					const fromShell = stdout.trim();
-					if (fromShell) {
-						this.shellApiKeyCache = fromShell;
-						return fromShell;
-					}
-				} catch {
-					// fall through
-				}
-				return '';
-			})().finally(() => {
-				this.shellApiKeyPromise = undefined;
-			});
+		const ctx = cliCtx ?? this.cliContext();
+		if (ctx.host === 'local-windows' && !ctx.linuxCwd) {
+			return '';
 		}
-		return this.shellApiKeyPromise;
+		try {
+			const env = await resolveLinuxAgentEnv(ctx);
+			const fromLinux = env.CURSOR_API_KEY?.trim() ?? '';
+			if (fromLinux) {
+				this.shellApiKeyCache = fromLinux;
+				return fromLinux;
+			}
+		} catch {
+			// fall through
+		}
+		return '';
+	}
+
+	private async resolveAgentEnv(
+		cliCtx: LinuxCliContext,
+		overrides?: Record<string, string | undefined>,
+	): Promise<LinuxAgentEnv> {
+		const env = await resolveLinuxAgentEnv(cliCtx, overrides);
+		if (shouldLogAgentEnv() && markAgentEnvLogged()) {
+			this.log?.line('bridge', '--', `agent env: ${agentEnvForLog(env)}`);
+		}
+		return env;
 	}
 
 	private async ensureSdkCatalog(force = false): Promise<CursorSdkCatalog | undefined> {
 		if (!force && this.sdkCatalog) {
 			return this.sdkCatalog;
 		}
-		const key = await this.resolveApiKey();
+		const key = this.resolveSdkApiKey() || (await this.resolveApiKey());
 		if (!key) {
 			this.log?.line('cursor', '--', 'SDK models: no API key (set wsldeck.cursor.apiKey or CURSOR_API_KEY)');
 			return undefined;
@@ -208,14 +220,15 @@ export class CursorProvider implements AgentProvider {
 		const workspace = getWorkspaceContext();
 		const handle = context as SessionHandle | undefined;
 		const sessionCtx = context as AgentSessionContext | undefined;
+		const raw =
+			handle?.workspaceCwd ??
+			handle?.acpSpawnCwd ??
+			sessionCtx?.linuxCwd ??
+			sessionCtx?.workspaceFolder ??
+			sessionCtx?.acpSpawnCwd ??
+			workspace.linuxCwd;
 		return mergeLinuxCliContext(workspace, {
-			linuxCwd:
-				handle?.workspaceCwd ??
-				handle?.acpSpawnCwd ??
-				sessionCtx?.linuxCwd ??
-				sessionCtx?.workspaceFolder ??
-				sessionCtx?.acpSpawnCwd ??
-				workspace.linuxCwd,
+			linuxCwd: toWslLinuxPath(raw, workspace.host) ?? workspace.linuxCwd,
 		});
 	}
 
@@ -223,7 +236,8 @@ export class CursorProvider implements AgentProvider {
 		const exe = this.executable();
 		const cliCtx = this.cliContext();
 		try {
-			const path = await resolveLinuxCommand(cliCtx, exe);
+			const linuxEnv = await this.resolveAgentEnv(cliCtx);
+			const path = await resolveLinuxCommand(cliCtx, exe, linuxEnv);
 			if (!path) {
 				return { available: false, cliPresent: false, detail: `"${exe}" not found` };
 			}
@@ -265,11 +279,13 @@ export class CursorProvider implements AgentProvider {
 		const exe = this.executable();
 		const cliCtx = this.cliContext(context);
 		try {
-			const path = await resolveLinuxCommand(cliCtx, exe);
-			if (path) {
-				const { stdout } = await runLinuxCli(cliCtx, [exe, '--list-models'], {
+			const linuxEnv = await this.resolveAgentEnv(cliCtx);
+			const argv = await resolveLinuxArgv(cliCtx, exe, ['--list-models'], linuxEnv);
+			if (argv) {
+				const { stdout } = await runLinuxCli(cliCtx, argv, {
 					timeout: 90_000,
 					maxBuffer: 8 * 1024 * 1024,
+					linuxEnv,
 				});
 				addAll(parseCursorModelList(stdout));
 			}
@@ -307,16 +323,33 @@ export class CursorProvider implements AgentProvider {
 	}
 
 	private resolveAcpSessionCwd(session: SessionHandle): string {
-		return session.workspaceCwd ?? this.resolveAcpSpawnCwd(session);
+		const raw = session.workspaceCwd ?? this.resolveAcpSpawnCwd(session);
+		const host = getWorkspaceContext().host;
+		return toWslLinuxPath(raw, host) ?? raw;
 	}
 
-	private async acpLinuxEnv(): Promise<Record<string, string | undefined>> {
-		const env: Record<string, string | undefined> = {};
-		const key = await this.resolveApiKey();
-		if (key) {
-			env.CURSOR_API_KEY = key;
+	private async acpLinuxEnv(cliCtx: LinuxCliContext): Promise<LinuxAgentEnv> {
+		const configured = this.getSetting('cursor.apiKey', '').trim();
+		const overrides: Record<string, string | undefined> = {};
+		if (configured) {
+			overrides.CURSOR_API_KEY = configured;
+		} else {
+			const key = await this.resolveApiKey(cliCtx);
+			if (key) {
+				overrides.CURSOR_API_KEY = key;
+			}
 		}
-		return env;
+		return this.resolveAgentEnv(cliCtx, overrides);
+	}
+
+	private async stopAcp(handle: SessionHandle): Promise<void> {
+		if (!handle.acp) {
+			handle.acpReady = false;
+			return;
+		}
+		await handle.acp.dispose();
+		handle.acp = undefined;
+		handle.acpReady = false;
 	}
 
 	private async ensureAcp(session: SessionHandle): Promise<CursorAcpClient> {
@@ -325,8 +358,9 @@ export class CursorProvider implements AgentProvider {
 		}
 		const exe = this.executable();
 		const cliCtx = this.cliContext(session);
-		const path = await resolveLinuxCommand(cliCtx, exe);
-		if (!path) {
+		const linuxEnv = await this.acpLinuxEnv(cliCtx);
+		const argv = await resolveLinuxArgv(cliCtx, exe, ['acp'], linuxEnv);
+		if (!argv) {
 			throw new Error(`Cursor CLI not found ("${exe}")`);
 		}
 		const client = new CursorAcpClient(this.log);
@@ -334,10 +368,10 @@ export class CursorProvider implements AgentProvider {
 		const sessionCwd = this.resolveAcpSessionCwd(session);
 		await client.start({
 			cliCtx,
-			argv: [exe, 'acp'],
-			env: await this.acpLinuxEnv(),
+			argv,
+			linuxEnv,
 		});
-		this.log?.line('cursor', '--', `${formatLinuxCliDetail(path, cliCtx)} acp`);
+		this.log?.line('cursor', '--', `${formatLinuxCliDetail(argv[0], cliCtx)} acp`);
 		if (sessionCwd) {
 			this.log?.line('cursor', '--', `session cwd=${sessionCwd}`);
 		}
@@ -584,6 +618,7 @@ export class CursorProvider implements AgentProvider {
 			}
 			await this.applySessionConfig(client, handle, options);
 		} catch (err) {
+			await this.stopAcp(handle);
 			session.status = 'FAILED';
 			yield {
 				type: 'session.failed',
@@ -800,6 +835,7 @@ export class CursorProvider implements AgentProvider {
 		}
 
 		if (promptError) {
+			await this.stopAcp(handle);
 			session.status = 'FAILED';
 			yield {
 				type: 'session.failed',
@@ -829,6 +865,9 @@ export class CursorProvider implements AgentProvider {
 			} catch {
 				// ignore
 			}
+		}
+		if (handle) {
+			await this.stopAcp(handle);
 		}
 		session.status = 'STOPPED';
 	}

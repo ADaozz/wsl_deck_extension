@@ -2,7 +2,9 @@ import * as assert from 'node:assert';
 import {
 	buildWslExeArgs,
 	distroFromRemoteAuthority,
+	parseDefaultRouteGateway,
 	resolveToWslPath,
+	toWslLinuxPath,
 } from '../workspace/wslPathResolver';
 
 suite('wslPathResolver', () => {
@@ -60,5 +62,26 @@ suite('wslPathResolver', () => {
 			'/mnt/d/projects/demo',
 		]);
 		assert.deepStrictEqual(buildWslExeArgs('/home/neo/project'), ['--cd', '/home/neo/project']);
+	});
+
+	test('toWslLinuxPath converts Windows paths on local-windows only', () => {
+		const shadow =
+			'C:\\Users\\Administrator\\.local\\share\\wsldeck-extension\\workspaces\\abc\\session-1';
+		assert.strictEqual(
+			toWslLinuxPath(shadow, 'local-windows'),
+			'/mnt/c/Users/Administrator/.local/share/wsldeck-extension/workspaces/abc/session-1',
+		);
+		assert.strictEqual(toWslLinuxPath('/home/neo/project', 'local-windows'), '/home/neo/project');
+		assert.strictEqual(toWslLinuxPath('/home/neo/shadow', 'wsl-remote'), '/home/neo/shadow');
+		assert.strictEqual(toWslLinuxPath(undefined, 'local-windows'), undefined);
+	});
+
+	test('parseDefaultRouteGateway reads default route gateway IP', () => {
+		assert.strictEqual(
+			parseDefaultRouteGateway('default via 172.24.96.1 dev eth0 proto kernel\n'),
+			'172.24.96.1',
+		);
+		assert.strictEqual(parseDefaultRouteGateway('172.24.96.1\n'), '172.24.96.1');
+		assert.strictEqual(parseDefaultRouteGateway(''), undefined);
 	});
 });

@@ -5,6 +5,24 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.3] - 2026-09-04
+
+Windows 本机 VS Code 下 Codex/Cursor 继承 WSL login shell 环境（PATH、proxy、NVM 等）。
+
+### 新增
+
+- **Agent Environment Resolver** — [`linuxAgentEnvironment.ts`](src/workspace/linuxAgentEnvironment.ts)：一次 `bash -lc printenv -0` 探测并缓存；经 `wsl ... env KEY=val` 注入 CLI
+- **`wsldeck.agent.env`** — 覆盖自动探测的 env（如 `HTTPS_PROXY`）
+- **`wsldeck.agent.logEnv`** — 首次 CLI 启动时在 Agent Log 打印 env 摘要（密钥打码）
+- Doctor **Agent env** 行：PATH/proxy 摘要、**WSL host** 宿主机 IP（NAT 下配 proxy）；检测 `127.0.0.1` proxy 并警告
+
+### 变更
+
+- `resolveLinuxCommand` 使用 resolved `PATH` + `bash -c command -v`，不再单独 `bash -lc` 探测
+- Cursor API key 从 resolved env / 设置读取，移除 `bash -lc printf CURSOR_API_KEY`
+
+[0.1.3]: https://github.com/ADaozz/wsl_deck_extension/releases/tag/v0.1.3
+
 ## [0.1.2] - 2026-09-04
 
 Windows 本机 VS Code 下 Codex/Cursor CLI 经 WSL 桥接执行。

@@ -1,16 +1,29 @@
 import { createInterface } from 'node:readline';
-import { spawnLinuxCli, type LinuxCliContext } from '../../../workspace/linuxCliBridge';
+import {
+	killLinuxCliChild,
+	spawnLinuxCli,
+	type LinuxCliContext,
+} from '../../../workspace/linuxCliBridge';
 
 export interface SpawnCodexExecOptions {
 	cliCtx: LinuxCliContext;
 	argv: string[];
+	linuxEnv?: Record<string, string | undefined>;
 	signal?: AbortSignal;
 	onStdoutLine: (line: string) => void;
 	onStderrLine?: (line: string) => void;
 }
 
-export async function runCodexExec(options: SpawnCodexExecOptions): Promise<number> {
-	const child = spawnLinuxCli(options.cliCtx, options.argv, { signal: options.signal });
+export interface CodexExecHandle {
+	promise: Promise<number>;
+	kill: () => void;
+}
+
+export function startCodexExec(options: SpawnCodexExecOptions): CodexExecHandle {
+	const child = spawnLinuxCli(options.cliCtx, options.argv, {
+		signal: options.signal,
+		linuxEnv: options.linuxEnv,
+	});
 	child.stdin?.end();
 
 	const out = createInterface({ input: child.stdout! });
@@ -19,10 +32,20 @@ export async function runCodexExec(options: SpawnCodexExecOptions): Promise<numb
 	const err = createInterface({ input: child.stderr! });
 	err.on('line', (line) => options.onStderrLine?.(line));
 
-	return await new Promise<number>((resolve, reject) => {
+	const promise = new Promise<number>((resolve, reject) => {
 		child.on('error', reject);
 		child.on('close', (code: number | null) => resolve(code ?? 1));
 	});
+
+	return {
+		promise,
+		kill: () => killLinuxCliChild(child),
+	};
+}
+
+/** @deprecated use startCodexExec */
+export async function runCodexExec(options: SpawnCodexExecOptions): Promise<number> {
+	return startCodexExec(options).promise;
 }
 
 export function buildCodexExecArgs(params: {

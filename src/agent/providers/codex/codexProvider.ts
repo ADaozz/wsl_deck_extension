@@ -20,10 +20,19 @@ import {
 	formatLinuxCliDetail,
 	mergeLinuxCliContext,
 	resolveLinuxCommand,
+	resolveLinuxArgv,
 	runLinuxCli,
 	type LinuxCliContext,
 } from '../../../workspace/linuxCliBridge';
+import {
+	agentEnvForLog,
+	markAgentEnvLogged,
+	resolveLinuxAgentEnv,
+	shouldLogAgentEnv,
+	type LinuxAgentEnv,
+} from '../../../workspace/linuxAgentEnvironment';
 import { getWorkspaceContext } from '../../../workspace/workspaceContext';
+import { toWslLinuxPath } from '../../../workspace/wslPathResolver';
 import {
 	codexItemActivityGroup,
 	codexItemCompletedOk,
@@ -32,7 +41,7 @@ import {
 	codexItemToolName,
 	parseCodexJsonLine,
 } from './codexEvents';
-import { buildCodexExecArgs, runCodexExec } from './codexProcess';
+import { buildCodexExecArgs, startCodexExec, type CodexExecHandle } from './codexProcess';
 
 function newId(prefix: string): string {
 	return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -42,10 +51,52 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function isCodexThreadStoreConflict(message: string): boolean {
+	return /thread-store conflict|already has an active writer/i.test(message);
+}
+
+function isCodexModelsCacheError(message: string): boolean {
+	return (
+		/failed to load models cache|failed to refresh available models/i.test(message) ||
+		/supports_parallel_tool_calls/i.test(message)
+	);
+}
+
+function isCodexBackendError(message: string): boolean {
+	return (
+		/rmcp::transport|Transport channel closed|chatgpt\.com\/backend-api/i.test(message) ||
+		/http\/request failed|error sending request for url/i.test(message)
+	);
+}
+
+const CODEX_MCP_REMINDER =
+	'提示：Codex MCP/后端网络异常（通常可忽略；若 Agent 无响应再检查 codex login 或代理）';
+
+function collectCodexFailureReason(stderrLines: string[], exitCode: number): string | undefined {
+	const joined = stderrLines.join('\n');
+	if (isCodexThreadStoreConflict(joined)) {
+		return 'Codex thread 被锁定（上一轮可能尚未退出）。请 /new 开新会话，或等待数秒后重试。';
+	}
+	if (isCodexModelsCacheError(joined)) {
+		return (
+			'Codex 模型缓存损坏或与 CLI 版本不匹配。在 WSL 中执行：' +
+			'rm -rf ~/.codex/cache/* && codex update && codex debug models，然后 /new 重试。'
+		);
+	}
+	if (exitCode !== 0 && /timeout waiting for child process/i.test(joined)) {
+		return (
+			'Codex 刷新模型列表超时（Shadow 在 /mnt/c 上时较常见）。' +
+			'可设置 wsldeck.shadow.root 为 WSL 内路径，或执行 /new 后重试。'
+		);
+	}
+	return undefined;
+}
+
 export class CodexProvider implements AgentProvider {
 	readonly id = 'codex';
 	readonly displayName = 'Codex';
 	private modelCatalog: CodexModelCatalogEntry[] = [];
+	private activeExec?: CodexExecHandle;
 
 	constructor(
 		private readonly getSetting: <T>(key: string, defaultValue: T) => T,
@@ -58,20 +109,30 @@ export class CodexProvider implements AgentProvider {
 
 	private cliContext(context?: AgentSessionContext): LinuxCliContext {
 		const workspace = getWorkspaceContext();
+		const raw =
+			context?.linuxCwd ??
+			context?.workspaceFolder ??
+			context?.acpSpawnCwd ??
+			workspace.linuxCwd;
 		return mergeLinuxCliContext(workspace, {
-			linuxCwd:
-				context?.linuxCwd ??
-				context?.workspaceFolder ??
-				context?.acpSpawnCwd ??
-				workspace.linuxCwd,
+			linuxCwd: toWslLinuxPath(raw, workspace.host) ?? workspace.linuxCwd,
 		});
+	}
+
+	private async resolveAgentEnv(cliCtx: LinuxCliContext): Promise<LinuxAgentEnv> {
+		const env = await resolveLinuxAgentEnv(cliCtx);
+		if (shouldLogAgentEnv() && markAgentEnvLogged()) {
+			this.log?.line('bridge', '--', `agent env: ${agentEnvForLog(env)}`);
+		}
+		return env;
 	}
 
 	async detect(): Promise<AgentAvailability> {
 		const exe = this.executable();
 		const cliCtx = this.cliContext();
 		try {
-			const path = await resolveLinuxCommand(cliCtx, exe);
+			const linuxEnv = await this.resolveAgentEnv(cliCtx);
+			const path = await resolveLinuxCommand(cliCtx, exe, linuxEnv);
 			if (!path) {
 				return { available: false, cliPresent: false, detail: `"${exe}" not found` };
 			}
@@ -90,11 +151,13 @@ export class CodexProvider implements AgentProvider {
 		const exe = this.executable();
 		const cliCtx = this.cliContext(context);
 		try {
-			const path = await resolveLinuxCommand(cliCtx, exe);
-			if (path) {
-				const { stdout } = await runLinuxCli(cliCtx, [exe, 'debug', 'models'], {
+			const linuxEnv = await this.resolveAgentEnv(cliCtx);
+			const argv = await resolveLinuxArgv(cliCtx, exe, ['debug', 'models'], linuxEnv);
+			if (argv) {
+				const { stdout } = await runLinuxCli(cliCtx, argv, {
 					timeout: 30_000,
 					maxBuffer: 8 * 1024 * 1024,
+					linuxEnv,
 				});
 				const catalog = parseCodexModelCatalog(stdout);
 				if (catalog.length > 0) {
@@ -129,10 +192,24 @@ export class CodexProvider implements AgentProvider {
 		});
 	}
 
+	private stopActiveExec(): void {
+		this.activeExec?.kill();
+		this.activeExec = undefined;
+	}
+
 	async *sendPrompt(
 		session: AgentSession,
 		prompt: string,
 		options?: SendPromptOptions,
+	): AsyncIterable<AgentEvent> {
+		yield* this.sendPromptOnce(session, prompt, options, false);
+	}
+
+	private async *sendPromptOnce(
+		session: AgentSession,
+		prompt: string,
+		options: SendPromptOptions | undefined,
+		retriedWithoutResume: boolean,
 	): AsyncIterable<AgentEvent> {
 		const exe = this.executable();
 		const cliCtx = this.cliContext({
@@ -140,9 +217,23 @@ export class CodexProvider implements AgentProvider {
 			workspaceFolder: session.workspaceCwd,
 		});
 
-		let codexPath: string | undefined;
+		const turnId = newId('turn');
+		const modelId = options?.modelId ?? session.modelId;
+		const host = getWorkspaceContext().host;
+		const workspaceCwd =
+			toWslLinuxPath(session.workspaceCwd, host) ?? session.workspaceCwd;
+
+		const args = buildCodexExecArgs({
+			prompt,
+			modelId,
+			reasoningId: options?.reasoningId,
+			cwd: workspaceCwd,
+			resumeId: retriedWithoutResume ? undefined : session.providerSessionId,
+		});
+
+		let linuxEnv: LinuxAgentEnv;
 		try {
-			codexPath = await resolveLinuxCommand(cliCtx, exe);
+			linuxEnv = await this.resolveAgentEnv(cliCtx);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			yield {
@@ -154,7 +245,21 @@ export class CodexProvider implements AgentProvider {
 			return;
 		}
 
-		if (!codexPath) {
+		let argv: string[] | undefined;
+		try {
+			argv = await resolveLinuxArgv(cliCtx, exe, args, linuxEnv);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			yield {
+				type: 'session.failed',
+				sessionId: session.id,
+				timestamp: Date.now(),
+				message,
+			};
+			return;
+		}
+
+		if (!argv) {
 			yield {
 				type: 'session.failed',
 				sessionId: session.id,
@@ -164,30 +269,24 @@ export class CodexProvider implements AgentProvider {
 			return;
 		}
 
-		const turnId = newId('turn');
-		const modelId = options?.modelId ?? session.modelId;
-		const workspaceCwd = session.workspaceCwd;
+		const codexPath = argv[0];
 
-		session.status = 'RUNNING';
-		yield {
-			type: 'session.started',
-			sessionId: session.id,
-			turnId,
-			timestamp: Date.now(),
-			providerId: this.id,
-		};
+		if (!retriedWithoutResume) {
+			session.status = 'RUNNING';
+			yield {
+				type: 'session.started',
+				sessionId: session.id,
+				turnId,
+				timestamp: Date.now(),
+				providerId: this.id,
+			};
 
-		const args = buildCodexExecArgs({
-			prompt,
-			modelId,
-			reasoningId: options?.reasoningId,
-			cwd: workspaceCwd,
-			resumeId: session.providerSessionId,
-		});
-		const argv = [exe, ...args];
-
-		this.log?.section(`codex exec · session ${session.id}`);
-		this.log?.show?.(true);
+			this.log?.section(`codex exec · session ${session.id}`);
+			this.log?.show?.(true);
+		} else {
+			session.status = 'RUNNING';
+			this.log?.line('codex', '--', 'retry without resume');
+		}
 		this.log?.line('codex', '--', `${codexPath} ${args.map(shellQuote).join(' ')}`);
 		if (workspaceCwd) {
 			this.log?.line('codex', '--', `cwd=${workspaceCwd}`);
@@ -202,15 +301,19 @@ export class CodexProvider implements AgentProvider {
 		let exitCode = 0;
 		let runError: Error | undefined;
 		let agentText = '';
+		const stderrLines: string[] = [];
 
 		const push = (event: AgentEvent) => {
 			queue.push(event);
 			wake?.();
 		};
 
-		const runPromise = runCodexExec({
+		let failedEarly = false;
+		let mcpReminded = false;
+		const exec = startCodexExec({
 			cliCtx,
 			argv,
+			linuxEnv,
 			signal: options?.signal,
 			onStdoutLine: (line) => {
 				this.log?.line('codex', '<<', line);
@@ -295,6 +398,10 @@ export class CodexProvider implements AgentProvider {
 					const message =
 						parsed.error?.message ??
 						(typeof parsed.message === 'string' ? parsed.message : 'Codex turn failed');
+					failedEarly = true;
+					this.stopActiveExec();
+					done = true;
+					wake?.();
 					push({
 						type: 'session.failed',
 						sessionId: session.id,
@@ -305,9 +412,20 @@ export class CodexProvider implements AgentProvider {
 				}
 			},
 			onStderrLine: (line) => {
+				stderrLines.push(line);
+				if (isCodexBackendError(line)) {
+					if (!mcpReminded) {
+						mcpReminded = true;
+						this.log?.line('codex', '--', CODEX_MCP_REMINDER);
+					}
+					this.log?.line('codex', '--', line);
+					return;
+				}
 				this.log?.line('codex', '!!', line);
 			},
-		})
+		});
+		this.activeExec = exec;
+		const runPromise = exec.promise
 			.then((code) => {
 				exitCode = code;
 				this.log?.line('codex', '--', `exit ${code}`);
@@ -317,6 +435,9 @@ export class CodexProvider implements AgentProvider {
 			})
 			.finally(() => {
 				done = true;
+				if (this.activeExec === exec) {
+					this.activeExec = undefined;
+				}
 				wake?.();
 			});
 
@@ -349,6 +470,11 @@ export class CodexProvider implements AgentProvider {
 
 		await runPromise;
 
+		if (failedEarly) {
+			session.status = 'FAILED';
+			return;
+		}
+
 		if (options?.signal?.aborted) {
 			session.status = 'STOPPED';
 			const err = new Error('Aborted');
@@ -356,6 +482,7 @@ export class CodexProvider implements AgentProvider {
 			throw err;
 		}
 		if (runError) {
+			this.stopActiveExec();
 			session.status = 'FAILED';
 			yield {
 				type: 'session.failed',
@@ -366,14 +493,32 @@ export class CodexProvider implements AgentProvider {
 			};
 			return;
 		}
-		if (exitCode !== 0 && !agentText) {
+		const failureReason = collectCodexFailureReason(stderrLines, exitCode);
+		if (
+			!retriedWithoutResume &&
+			session.providerSessionId &&
+			failureReason &&
+			isCodexThreadStoreConflict(stderrLines.join('\n'))
+		) {
+			this.log?.line('codex', '--', 'thread lock — retry without resume');
+			session.providerSessionId = undefined;
+			yield* this.sendPromptOnce(session, prompt, options, true);
+			return;
+		}
+		if ((exitCode !== 0 && !agentText) || failedEarly) {
+			if (!failedEarly) {
+				this.stopActiveExec();
+			}
 			session.status = 'FAILED';
+			if (failureReason && isCodexThreadStoreConflict(stderrLines.join('\n'))) {
+				session.providerSessionId = undefined;
+			}
 			yield {
 				type: 'session.failed',
 				sessionId: session.id,
 				turnId,
 				timestamp: Date.now(),
-				message: `codex exited with code ${exitCode}`,
+				message: failureReason ?? `codex exited with code ${exitCode}`,
 			};
 			return;
 		}
@@ -381,10 +526,12 @@ export class CodexProvider implements AgentProvider {
 	}
 
 	async cancel(session: AgentSession): Promise<void> {
+		this.stopActiveExec();
 		session.status = 'STOPPED';
 	}
 
 	async dispose(session: AgentSession): Promise<void> {
+		this.stopActiveExec();
 		session.status = 'CLOSED';
 	}
 }

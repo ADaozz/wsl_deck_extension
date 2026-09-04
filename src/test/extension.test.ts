@@ -22,6 +22,7 @@ suite('WSLDeck M0/M1', () => {
 		assert.ok(report.checks.some((c) => c.name === 'Workspace'));
 		assert.ok(report.checks.some((c) => c.name === 'Git'));
 		assert.ok(report.checks.some((c) => c.name === 'WSL'));
+		assert.ok(report.checks.some((c) => c.name === 'Agent env'));
 		assert.ok(report.checks.some((c) => c.name === 'Codex CLI' || c.name === 'Codex'));
 		assert.ok(report.checks.some((c) => c.name === 'Cursor CLI' || c.name === 'Cursor'));
 		assert.ok(report.checks.some((c) => c.name === 'WSL cwd'));

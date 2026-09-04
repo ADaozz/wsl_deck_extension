@@ -8,6 +8,12 @@ import {
 	resolveLinuxCommand,
 	runLinuxCli,
 } from '../workspace/linuxCliBridge';
+import {
+	agentEnvForLog,
+	invalidateLinuxAgentEnvCache,
+	probeWslHostGatewayIp,
+	resolveLinuxAgentEnv,
+} from '../workspace/linuxAgentEnvironment';
 import { getWorkspaceContext, NO_WORKSPACE_FOLDER_HINT } from '../workspace/workspaceContext';
 
 const execFileAsync = promisify(execFile);
@@ -46,14 +52,16 @@ async function runVersionViaBridge(
 	cliCtx: ReturnType<typeof mergeLinuxCliContext>,
 	command: string,
 	args: string[],
+	linuxEnv: Record<string, string>,
 ): Promise<string | undefined> {
-	const path = await resolveLinuxCommand(cliCtx, command);
+	const path = await resolveLinuxCommand(cliCtx, command, linuxEnv);
 	if (!path) {
 		return undefined;
 	}
 	try {
-		const { stdout, stderr } = await runLinuxCli(cliCtx, [command, ...args], {
+		const { stdout, stderr } = await runLinuxCli(cliCtx, [path, ...args], {
 			timeout: 5_000,
+			linuxEnv,
 		});
 		const text = (stdout || stderr).trim().split('\n')[0] ?? '';
 		return text || undefined;
@@ -84,10 +92,67 @@ function formatReport(checks: DoctorCheck[]): string {
 	return lines.join('\n');
 }
 
+function proxyConfigured(env: Record<string, string>): boolean {
+	return Boolean(
+		env.HTTPS_PROXY?.trim() ||
+			env.https_proxy?.trim() ||
+			env.HTTP_PROXY?.trim() ||
+			env.http_proxy?.trim() ||
+			env.ALL_PROXY?.trim() ||
+			env.all_proxy?.trim(),
+	);
+}
+
+function proxyUsesLoopback(env: Record<string, string>): boolean {
+	const keys = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy'];
+	return keys.some((key) => {
+		const value = env[key]?.trim();
+		return Boolean(value && /(?:127\.0\.0\.1|localhost)/i.test(value));
+	});
+}
+
+async function formatAgentEnvDetail(
+	cliCtx: ReturnType<typeof mergeLinuxCliContext>,
+	linuxEnv: Record<string, string>,
+): Promise<{ detail: string; status: CheckStatus }> {
+	const parts: string[] = [];
+	if (cliCtx.host === 'local-windows' && cliCtx.linuxCwd) {
+		const wslHost = await probeWslHostGatewayIp(cliCtx);
+		if (wslHost) {
+			parts.push(`WSL host=${wslHost}`);
+		}
+	}
+	parts.push(agentEnvForLog(linuxEnv));
+	if (cliCtx.host === 'local-windows' && proxyUsesLoopback(linuxEnv)) {
+		parts.push('proxy 含 localhost，请改用 WSL host IP + 端口');
+	}
+	const proxy = proxyConfigured(linuxEnv);
+	let status: CheckStatus = proxy || linuxEnv.PATH ? 'ok' : 'warn';
+	if (cliCtx.host === 'local-windows' && proxyUsesLoopback(linuxEnv)) {
+		status = 'warn';
+	}
+	return { detail: parts.join(', '), status };
+}
+
 export async function runDoctor(sessions?: AgentSessionManager): Promise<DoctorReport> {
 	const checks: DoctorCheck[] = [];
 	const ctx = getWorkspaceContext();
 	const cliCtx = mergeLinuxCliContext(ctx);
+
+	invalidateLinuxAgentEnvCache(cliCtx.distro);
+	let linuxEnv: Record<string, string> = {};
+	if (cliCtx.linuxCwd || cliCtx.host !== 'local-windows') {
+		try {
+			linuxEnv = await resolveLinuxAgentEnv(cliCtx);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			checks.push({
+				name: 'Agent env',
+				status: 'fail',
+				detail: message,
+			});
+		}
+	}
 
 	const folders = vscode.workspace.workspaceFolders;
 	if (folders && folders.length > 0) {
@@ -104,10 +169,25 @@ export async function runDoctor(sessions?: AgentSessionManager): Promise<DoctorR
 		});
 	}
 
+	if (Object.keys(linuxEnv).length > 0) {
+		const { detail, status } = await formatAgentEnvDetail(cliCtx, linuxEnv);
+		checks.push({
+			name: 'Agent env',
+			status,
+			detail,
+		});
+	} else if (cliCtx.host === 'local-windows' && !cliCtx.linuxCwd) {
+		checks.push({
+			name: 'Agent env',
+			status: 'warn',
+			detail: '打开工作区后在 WSL login shell 内探测',
+		});
+	}
+
 	if (cliCtx.linuxCwd || cliCtx.host !== 'local-windows') {
-		const gitPath = await resolveLinuxCommand(cliCtx, 'git');
+		const gitPath = await resolveLinuxCommand(cliCtx, 'git', linuxEnv);
 		if (gitPath) {
-			const version = await runVersionViaBridge(cliCtx, 'git', ['--version']);
+			const version = await runVersionViaBridge(cliCtx, 'git', ['--version'], linuxEnv);
 			checks.push({
 				name: 'Git',
 				status: 'ok',
@@ -169,14 +249,14 @@ export async function runDoctor(sessions?: AgentSessionManager): Promise<DoctorR
 		const codexExe = config.get<string>('codex.executable', 'codex');
 		const cursorExe = config.get<string>('cursor.executable', 'agent');
 
-		const codexPath = await resolveLinuxCommand(cliCtx, codexExe);
+		const codexPath = await resolveLinuxCommand(cliCtx, codexExe, linuxEnv);
 		checks.push(
 			codexPath
 				? { name: 'Codex CLI', status: 'ok', detail: formatLinuxCliDetail(codexPath, cliCtx) }
 				: { name: 'Codex CLI', status: 'warn', detail: `"${codexExe}" not found in Linux environment` },
 		);
 
-		const cursorPath = await resolveLinuxCommand(cliCtx, cursorExe);
+		const cursorPath = await resolveLinuxCommand(cliCtx, cursorExe, linuxEnv);
 		checks.push(
 			cursorPath
 				? { name: 'Cursor CLI', status: 'ok', detail: formatLinuxCliDetail(cursorPath, cliCtx) }

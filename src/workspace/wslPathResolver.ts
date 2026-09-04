@@ -21,6 +21,27 @@ function stripTrailingSlash(path: string): string {
 	return path;
 }
 
+export type WslPathHostKind = 'local-windows' | 'local-linux' | 'wsl-remote' | 'other-remote';
+
+/**
+ * Convert a host filesystem path to a Linux path for WSL CLI / Agent cwd.
+ * On local-windows, Windows paths (e.g. shadow under %USERPROFILE%) become /mnt/...
+ * On other hosts, returns the path unchanged (already Linux inside WSL/remote).
+ */
+export function toWslLinuxPath(
+	input: string | undefined,
+	host: WslPathHostKind,
+): string | undefined {
+	if (!input?.trim()) {
+		return undefined;
+	}
+	if (host !== 'local-windows') {
+		return stripTrailingSlash(input.trim());
+	}
+	const resolved = resolveToWslPath(input);
+	return resolved.ok ? resolved.linuxPath : undefined;
+}
+
 /**
  * Convert a workspace / filesystem path into a Linux path usable inside WSL.
  *
@@ -96,4 +117,24 @@ export function buildWslExeArgs(linuxCwd: string, distro?: string): string[] {
 	}
 	args.push('--cd', linuxCwd);
 	return args;
+}
+
+const DEFAULT_ROUTE_GATEWAY = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+
+/** Parse Windows host gateway IP from `ip route` default line or bare IP stdout. */
+export function parseDefaultRouteGateway(ipRouteOutput: string): string | undefined {
+	for (const raw of ipRouteOutput.trim().split(/\r?\n/)) {
+		const line = raw.trim();
+		if (!line) {
+			continue;
+		}
+		if (DEFAULT_ROUTE_GATEWAY.test(line)) {
+			return line;
+		}
+		const match = /^default\s+via\s+(\S+)/i.exec(line);
+		if (match?.[1] && DEFAULT_ROUTE_GATEWAY.test(match[1])) {
+			return match[1];
+		}
+	}
+	return undefined;
 }

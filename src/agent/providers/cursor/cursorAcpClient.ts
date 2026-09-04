@@ -1,6 +1,6 @@
 import { createInterface } from 'node:readline';
 import type { AgentRawLog } from '../../agentRawLog';
-import { spawnLinuxCli, type LinuxCliContext } from '../../../workspace/linuxCliBridge';
+import { spawnLinuxCli, killLinuxCliChild, type LinuxCliContext } from '../../../workspace/linuxCliBridge';
 
 type Pending = {
 	resolve: (value: unknown) => void;
@@ -16,6 +16,7 @@ export type AcpNotificationHandler = (
 export type AcpStartOptions = {
 	cliCtx: LinuxCliContext;
 	argv: string[];
+	linuxEnv?: Record<string, string | undefined>;
 	env?: Record<string, string | undefined>;
 };
 
@@ -39,6 +40,7 @@ export class CursorAcpClient {
 			return;
 		}
 		const child = spawnLinuxCli(options.cliCtx, options.argv, {
+			linuxEnv: options.linuxEnv,
 			env: options.env,
 		}) as import('node:child_process').ChildProcessWithoutNullStreams;
 		this.child = child;
@@ -137,11 +139,12 @@ export class CursorAcpClient {
 	async dispose(): Promise<void> {
 		const child = this.child;
 		this.child = undefined;
+		this.pending.clear();
 		if (!child) {
 			return;
 		}
-		child.stdin.end();
-		child.kill('SIGTERM');
+		child.stdin?.end();
+		killLinuxCliChild(child);
 	}
 
 	private onLine(line: string): void {

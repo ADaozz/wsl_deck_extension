@@ -1567,6 +1567,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 			lane.sessionId = session.id;
 			lane.providerSessionId = session.providerSessionId;
 
+			let promptFailed = false;
 			for await (const event of this.sessions.sendPrompt(prompt, {
 				providerId,
 				modelId: lane.modelId,
@@ -1592,10 +1593,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				}
 				this.post({ type: 'agentEvent', event });
 				this.pushState();
+				if (event.type === 'session.failed') {
+					promptFailed = true;
+					break;
+				}
 			}
 			if (!stillThisRun()) {
 				return;
 			}
+			lane.providerSessionId = session.providerSessionId;
 			freezeTurnActivities();
 			const finishedMsg = lane.messages.find((m) => m.id === agentMsgId);
 			if (finishedMsg) {
@@ -1603,6 +1609,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				finishedMsg.thoughtStreaming = false;
 			}
 			await this.refreshChanges(lane, { agentMsgId, turnId: lane.activeTurnId });
+			if (promptFailed) {
+				lane.status = 'error';
+				this.statusDetail = lane.error;
+				this.pushState();
+				this.persistLaneDeck(lane);
+				return;
+			}
 			if (this.selectedProviderId === providerId) {
 				lane.status = 'idle';
 				this.statusDetail = undefined;
@@ -1714,6 +1727,26 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				lane.error = event.message;
 				lane.status = 'error';
 				lane.pendingPermission = undefined;
+				const msg = lane.messages.find((m) => m.id === agentMsgId);
+				if (msg) {
+					msg.streaming = false;
+					msg.thoughtStreaming = false;
+				}
+				lane.activities = lane.activities.map((a) =>
+					a.status === 'running'
+						? { ...a, status: 'failed', outcome: event.message }
+						: a,
+				);
+				const session = this.sessions.getSession(this.selectedProviderId);
+				if (session && !session.providerSessionId) {
+					lane.providerSessionId = undefined;
+				} else if (
+					session?.providerSessionId &&
+					/thread-store conflict|already has an active writer/i.test(event.message)
+				) {
+					session.providerSessionId = undefined;
+					lane.providerSessionId = undefined;
+				}
 				return;
 			}
 			case 'permission.requested': {

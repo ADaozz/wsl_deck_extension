@@ -2,7 +2,7 @@
   "name": "wsldeck-extension",
   "displayName": "WSLDeck",
   "description": "Unified WSL AI Agent workflow for VS Code — Codex, Cursor, Shadow Workspace, Proposed Changes",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "wsldeck",
   "license": "MIT",
   "repository": {
@@ -143,6 +143,19 @@
           "type": "string",
           "default": "",
           "description": "Preferred model id when present in the provider model list"
+        },
+        "wsldeck.agent.env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Inject env into WSL Codex/Cursor (overrides login-shell probe). On Windows host + WSL NAT use Doctor WSL host IP for proxy, not 127.0.0.1 — see README."
+        },
+        "wsldeck.agent.logEnv": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log resolved agent env summary on first CLI spawn (secrets masked)"
         },
         "wsldeck.wsl.distribution": {
           "type": "string",

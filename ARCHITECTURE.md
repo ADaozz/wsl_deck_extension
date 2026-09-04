@@ -71,7 +71,7 @@ WSLDeck 不重新造 IDE，不重新造 Agent，也不重新造 Git。它把 VS 
 | 层 | 职责 |
 |----|------|
 | **VS Code** | Editor、Diff 视图、SCM、终端 UI、Problems、用户输入 |
-| **WSLDeck** | Agent 编排、会话、Provider 桥接、变更审查 UI、WSL 路径/cwd 映射 |
+| **WSLDeck** | Agent 编排、会话、Provider 桥接、变更审查 UI、WSL 路径/cwd 映射、**Agent env resolver**（Windows 本机注入 WSL login shell 环境） |
 | **Linux / WSL** | Agent 进程、shell、文件系统、权限模型、工具链（grep、git、pytest、docker…） |
 | **Codex / Cursor** | 推理与 Agent execution（CLI） |
 | **Change Safety Layer** | 隔离、跟踪、Diff、Keep / Cancel（Shadow 为当前隔离实现） |
@@ -180,13 +180,17 @@ ShadowWorkspaceIsolation（当前实现）
 
 | 架构层 | 源码 |
 |--------|------|
-| Runtime Bridge | [`src/workspace/linuxCliBridge.ts`](src/workspace/linuxCliBridge.ts)、[`src/workspace/wslPathResolver.ts`](src/workspace/wslPathResolver.ts)、[`src/workspace/workspaceContext.ts`](src/workspace/workspaceContext.ts)、[`src/terminal/wslTerminalProfile.ts`](src/terminal/wslTerminalProfile.ts)、[`src/terminal/terminalService.ts`](src/terminal/terminalService.ts) |
+| Runtime Bridge | [`src/workspace/linuxCliBridge.ts`](src/workspace/linuxCliBridge.ts)、[`src/workspace/linuxAgentEnvironment.ts`](src/workspace/linuxAgentEnvironment.ts)、[`src/workspace/wslPathResolver.ts`](src/workspace/wslPathResolver.ts)、[`src/workspace/workspaceContext.ts`](src/workspace/workspaceContext.ts)、[`src/terminal/wslTerminalProfile.ts`](src/terminal/wslTerminalProfile.ts)、[`src/terminal/terminalService.ts`](src/terminal/terminalService.ts) |
 | Agent Provider | [`src/agent/providers/providerFactory.ts`](src/agent/providers/providerFactory.ts)、[`src/agent/providers/codex/`](src/agent/providers/codex/)、[`src/agent/providers/cursor/`](src/agent/providers/cursor/) |
 | 会话与编排 | [`src/agent/agentSessionManager.ts`](src/agent/agentSessionManager.ts)、[`src/state/sessionStore.ts`](src/state/sessionStore.ts) |
 | Change Engine | [`src/change/changeTracker.ts`](src/change/changeTracker.ts)、[`src/change/changeRevisions.ts`](src/change/changeRevisions.ts)、[`src/change/changeActions.ts`](src/change/changeActions.ts)、[`src/change/baselineOverlay.ts`](src/change/baselineOverlay.ts) |
 | Change Isolation（当前） | [`src/shadow/shadowWorkspaceManager.ts`](src/shadow/shadowWorkspaceManager.ts)、[`src/shadow/shadowPaths.ts`](src/shadow/shadowPaths.ts) |
 | IDE 集成 | [`src/ui/agentViewProvider.ts`](src/ui/agentViewProvider.ts)、[`webview/`](webview/)、[`media/agent-view.css`](media/agent-view.css) |
 | 健康检查 | [`src/doctor/doctor.ts`](src/doctor/doctor.ts) |
+
+### Agent env 与代理（Windows 本机）
+
+`local-windows` 下 Linux 进程 env **仅**来自 [`linuxAgentEnvironment.ts`](src/workspace/linuxAgentEnvironment.ts) 对 WSL login shell 的一次探测 + `wsldeck.agent.env` 覆盖，**不**继承 Windows `process.env`。WSL NAT 下 proxy 须指向 Doctor 显示的 **WSL host**（默认路由网关），不能写 `127.0.0.1`。配置步骤见 [README — 代理 / 梯子](README.md#配置)。
 
 ---
 
