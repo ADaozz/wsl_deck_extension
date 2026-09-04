@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version 0.1.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="version 0.1.1" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
   <img src="https://img.shields.io/badge/tests-77%20passing-brightgreen" alt="77 tests" />
   <img src="https://img.shields.io/badge/platform-WSL%20%7C%20Linux%20%7C%20Remote--WSL-informational" alt="platform" />
@@ -77,7 +77,7 @@ npm run compile
 ```bash
 npm test
 npx vsce package
-# 在扩展视图 → ··· → 从 VSIX 安装 → 选择 wsldeck-extension-0.1.0.vsix
+# 在扩展视图 → ··· → 从 VSIX 安装 → 选择 wsldeck-extension-0.1.1.vsix
 ```
 
 ### 首次使用

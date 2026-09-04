@@ -5,6 +5,21 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-09-04
+
+补丁版 — 文档定位调整与未打开工作区时的体验修复。
+
+### 变更
+
+- **文档定位** — ARCHITECTURE / README / DEVELOPMENT §1 以 Linux-native Agent Runtime 为核心，Shadow 降级为变更安全层实现
+
+### 修复
+
+- 未打开工作区文件夹时，Doctor / 终端 / Agent 显示中文可操作提示
+- Agent 侧栏展示「需要打开文件夹」引导页与「打开文件夹…」按钮；打开文件夹后 UI 自动刷新
+
+[0.1.1]: https://github.com/ADaozz/wsl_deck_extension/releases/tag/v0.1.1
+
 ## [0.1.0] - 2026-09-04
 
 首个公开发布版 — 统一的 WSL AI Agent 工作流，变更需审查确认后再 Keep。

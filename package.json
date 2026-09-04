@@ -2,7 +2,7 @@
   "name": "wsldeck-extension",
   "displayName": "WSLDeck",
   "description": "Unified WSL AI Agent workflow for VS Code — Codex, Cursor, Shadow Workspace, Proposed Changes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "wsldeck",
   "license": "MIT",
   "repository": {
