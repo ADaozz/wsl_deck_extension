@@ -52,7 +52,7 @@ import {
 	upsertResumeEntry,
 	writeSessionDeck,
 } from '../state/workspaceDeckStore';
-import { getWorkspaceContext } from '../workspace/workspaceContext';
+import { getWorkspaceContext, NO_WORKSPACE_FOLDER_HINT } from '../workspace/workspaceContext';
 import { runInWslTerminal } from '../terminal/terminalService';
 import {
 	activityFromTool,
@@ -135,6 +135,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		this.restoreAll();
 		this.ensureLane(this.selectedProviderId);
 		this.sessions.focus(this.selectedProviderId);
+		context.subscriptions.push(
+			vscode.workspace.onDidChangeWorkspaceFolders(() => {
+				this.pushState();
+			}),
+		);
 	}
 
 	dispose(): void {
@@ -605,6 +610,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
 	private getState(): AgentViewState {
 		const lane = this.lane();
+		const workspaceCtx = getWorkspaceContext();
 		this.refreshReasoningCatalog(lane);
 		this.refreshFastCatalog(lane);
 		return {
@@ -647,6 +653,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 					}
 				: undefined,
 			changes: this.toChangeCards(lane.changes),
+			workspaceHint: workspaceCtx.linuxCwd ? undefined : (workspaceCtx.error ?? NO_WORKSPACE_FOLDER_HINT),
 			slashCommands: DEFAULT_SLASH_COMMANDS,
 			sessionId: lane.sessionId,
 			restoredFromPersist: lane.restoredFromPersist,
@@ -1163,6 +1170,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 			case 'selectResume':
 				await this.switchResume(message.sessionId);
 				return;
+			case 'openWorkspaceFolder':
+				await vscode.commands.executeCommand('workbench.action.files.openFolder');
+				return;
 			case 'sendPrompt':
 				await this.handlePrompt(message.text);
 				return;
@@ -1453,6 +1463,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 	private async handlePrompt(text: string): Promise<void> {
 		const prompt = text.trim();
 		if (!prompt) {
+			return;
+		}
+		if (!getWorkspaceContext().linuxCwd) {
+			this.post({ type: 'toast', message: NO_WORKSPACE_FOLDER_HINT });
 			return;
 		}
 		const providerId = this.selectedProviderId;

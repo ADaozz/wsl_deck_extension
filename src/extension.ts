@@ -71,8 +71,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			doctorOutput.appendLine(report.text);
 			await vscode.window.showInformationMessage(
 				report.ok
-					? 'WSLDeck Doctor: environment looks good.'
-					: 'WSLDeck Doctor: some checks failed. See Output.',
+					? 'WSLDeck Doctor：环境检查通过。'
+					: 'WSLDeck Doctor：部分检查未通过，请查看 Output 面板。',
 			);
 		}),
 	);

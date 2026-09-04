@@ -697,6 +697,13 @@ function renderMessage(message: ConversationMessage, activitiesHtml = ''): strin
 }
 
 function renderTranscript(): string {
+	if (state.workspaceHint) {
+		return `<div class="empty workspace-blocked">
+  <div class="empty-title">需要打开文件夹</div>
+  <div class="empty-body">${escapeHtml(state.workspaceHint)}</div>
+  <button type="button" class="workspace-open-btn" id="openFolderBtn">打开文件夹…</button>
+</div>`;
+	}
 	if (state.messages.length === 0) {
 		return `<div class="empty">
   <div class="empty-title">WSLDeck</div>
@@ -1351,6 +1358,7 @@ function renderFeedbackBar(): string {
 
 function render(): void {
 	const running = state.status === 'running' || state.status === 'waiting';
+	const blocked = !!state.workspaceHint;
 
 	appRoot.innerHTML = `
   <div class="scroll" id="scroll">${renderTranscript()}</div>
@@ -1358,7 +1366,7 @@ function render(): void {
     ${renderMenu()}
     ${renderFeedbackBar()}
     <div class="composer">
-      <textarea id="input" rows="2" placeholder="Ask Agent…  (/model · Enter→reasoning · /mode)" ${running ? 'disabled' : ''}>${escapeHtml(draft)}</textarea>
+      <textarea id="input" rows="2" placeholder="${blocked ? '请先打开工作区文件夹…' : 'Ask Agent…  (/model · Enter→reasoning · /mode)'}" ${running || blocked ? 'disabled' : ''}>${escapeHtml(draft)}</textarea>
       <div class="composer-toolbar">
         <div class="picker-row">
           <button type="button" class="composer-btn" id="newBtn" title="New session" aria-label="New session" ${running ? 'disabled' : ''}>
@@ -1481,6 +1489,10 @@ function render(): void {
 		patchMenu();
 	});
 
+	document.getElementById('openFolderBtn')?.addEventListener('click', () => {
+		post({ type: 'openWorkspaceFolder' });
+	});
+
 	bindMenuClicks();
 	bindActivityToggles();
 	bindThoughtToggles();
@@ -1491,7 +1503,7 @@ function render(): void {
 	const cancel = document.getElementById('cancel');
 
 	const submit = () => {
-		if (!input || running || composing) {
+		if (!input || running || composing || state.workspaceHint) {
 			return;
 		}
 		const text = input.value.trim();

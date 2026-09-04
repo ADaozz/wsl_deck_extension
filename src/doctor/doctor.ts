@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as vscode from 'vscode';
 import type { AgentSessionManager } from '../agent/agentSessionManager';
-import { getWorkspaceContext } from '../workspace/workspaceContext';
+import { getWorkspaceContext, NO_WORKSPACE_FOLDER_HINT } from '../workspace/workspaceContext';
 
 const execFileAsync = promisify(execFile);
 
@@ -82,7 +82,7 @@ export async function runDoctor(sessions?: AgentSessionManager): Promise<DoctorR
 		checks.push({
 			name: 'Workspace',
 			status: 'fail',
-			detail: 'No folder open',
+			detail: NO_WORKSPACE_FOLDER_HINT,
 		});
 	}
 

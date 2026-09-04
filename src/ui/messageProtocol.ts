@@ -136,6 +136,8 @@ export interface AgentViewState {
 	/** In-flight permission request awaiting user choice */
 	pendingPermission?: PendingPermissionCard;
 	changes: ProposedChangeCard[];
+	/** Set when no workspace folder is open — blocks Agent until resolved. */
+	workspaceHint?: string;
 	slashCommands: SlashCommandInfo[];
 	sessionId: string;
 	/** True when this view restored a persisted transcript */
@@ -164,7 +166,8 @@ export type WebviewToHostMessage =
 	| { type: 'rejectAllChanges' }
 	| { type: 'viewDiff'; changeId: string }
 	| { type: 'viewRevisionDiff'; changeId: string; revisionId: string }
-	| { type: 'compareMain'; changeId: string };
+	| { type: 'compareMain'; changeId: string }
+	| { type: 'openWorkspaceFolder' };
 
 /** Extension → Webview */
 export type HostToWebviewMessage =

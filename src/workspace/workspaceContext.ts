@@ -3,6 +3,10 @@ import { distroFromRemoteAuthority, resolveToWslPath } from './wslPathResolver';
 
 export type ExtensionHostKind = 'local-windows' | 'local-linux' | 'wsl-remote' | 'other-remote';
 
+/** Shown when vscode.workspace.workspaceFolders is empty. */
+export const NO_WORKSPACE_FOLDER_HINT =
+	'未打开工作区文件夹。请使用「文件 → 打开文件夹…」打开项目目录后再使用 WSLDeck。';
+
 export interface WorkspaceContext {
 	host: ExtensionHostKind;
 	/** First workspace folder fsPath, if any */
@@ -58,7 +62,7 @@ export function getWorkspaceContext(): WorkspaceContext {
 		return {
 			host,
 			distro,
-			error: 'No folder open',
+			error: NO_WORKSPACE_FOLDER_HINT,
 		};
 	}
 
