@@ -350,7 +350,9 @@ export function modelIdWithFast(
 }
 
 export async function fetchCursorSdkCatalog(apiKey: string): Promise<CursorSdkCatalog> {
-	const { Cursor } = await import('@cursor/sdk');
+	// CJS require — VSIX ships node_modules/@cursor/sdk (see .vscodeignore).
+	// eslint-disable-next-line @typescript-eslint/no-require-imports
+	const { Cursor } = require('@cursor/sdk') as typeof import('@cursor/sdk');
 	const models = await Cursor.models.list({ apiKey: apiKey.trim() });
 	return parseSdkModelList(models);
 }

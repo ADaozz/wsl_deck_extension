@@ -17,6 +17,7 @@
 
 - 未打开工作区文件夹时，Doctor / 终端 / Agent 显示中文可操作提示
 - Agent 侧栏展示「需要打开文件夹」引导页与「打开文件夹…」按钮；打开文件夹后 UI 自动刷新
+- **VSIX** — 打包包含 `@cursor/sdk` 等运行时 JS 依赖（排除 `@cursor/sdk-*` 平台原生二进制），修复 `Cannot find package '@cursor/sdk'`
 
 [0.1.1]: https://github.com/ADaozz/wsl_deck_extension/releases/tag/v0.1.1
 

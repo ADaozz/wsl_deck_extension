@@ -166,6 +166,7 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --preserveWatchOutput",
     "package": "npm run check-types && node esbuild.js --production",
+    "vsix": "vsce package",
     "lint": "eslint src webview",
     "test": "vscode-test",
     "pretest": "npm run compile && npm run compile-tests && npm run lint"
