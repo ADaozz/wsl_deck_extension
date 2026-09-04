@@ -1,8 +1,8 @@
 <h1 align="center">WSLDeck</h1>
 
 <p align="center">
-  <strong>面向 VS Code 的统一 WSL AI Agent 工作流</strong><br/>
-  Codex & Cursor CLI · 影子工作区 · 确认后再 Keep
+  <strong>让 Codex、Cursor 等 Coding Agent 原生运行在 Linux/WSL 环境，同时保留完整的 VS Code 开发体验</strong><br/>
+  Linux-native Agent · Codex & Cursor CLI · 可审查变更 · Keep / Cancel · Native Git
 </p>
 
 <p align="center">
@@ -16,36 +16,50 @@
 
 ## 为什么需要 WSLDeck
 
-AI 编程 Agent 很强，但直接改你的仓库有风险。**WSLDeck** 让 Agent 在**影子工作区（Shadow）**里编辑，把每次文件变更展示为可审查的 Diff 卡片，只有你点击 **Keep** 后才会写入**主工作区（Main）**。
+Coding Agent 的日常动作——`grep`、`git`、`pytest`、`npm test`、`chmod`、`bash` 脚本——在 **Linux 语义**下最自然。在 Windows 本机直接跑 Agent，常碰到 PowerShell/CMD 与 bash 差异、路径转换、CRLF、权限与 quoting 等问题。
 
-Git 仍由你掌控 — WSLDeck 不会自动 commit、push，也不会操作 remote。
+**WSLDeck** 让 Agent **原生运行在 Linux/WSL**：Linux shell、Linux 文件系统、Linux PATH 与工具链。你在 VS Code 里写代码、看 Diff、用 SCM；Agent 在 Linux 侧执行，语义更接近 Ubuntu 服务器、容器与常见生产环境。
 
 ```
-Agent（Codex / Cursor）
-        ↓
-影子工作区  ──检测──▶  Diff 卡片（Keep / Cancel）
-        ↓                              ↓
-   （隔离编辑）                    主工作区
+Developer（VS Code / Windows UI）
+        │
+        ▼
+WSLDeck Runtime Bridge
+        │
+        ▼
+WSL / Linux（Agent 进程 · shell · 工具链）
+        │
+        ▼
+Linux Workspace
 ```
+
+### 变更如何被安全管理
+
+AI 改代码不应是黑盒。WSLDeck 在变更进入主工作区前提供 **Change Safety Layer**：
+
+- 检测 Agent 产生的文件变更，展示 Diff 卡片
+- 按轮次 Revision 历史、时间戳、View Diff
+- **Keep** 写入 Main，**Cancel** 丢弃；Git 仍由 VS Code 与你掌控
+
+**v0.1.0** 默认通过 **Shadow Workspace** 隔离 Agent 编辑（Main 仅在 Keep 时更新）。Shadow 是隔离策略的一种实现，不是 WSLDeck 存在的唯一理由——**Linux-native Runtime 才是**。
 
 ## 功能概览
 
 | 模块 | 说明 |
 |------|------|
-| **Provider** | 同一 Agent 侧栏内切换 Codex CLI 与 Cursor `agent acp` |
-| **变更审查** | 按文件卡片展示，支持每轮 revision 历史、时间戳、View Diff |
-| **安全机制** | Main 相对 baseline 有变动时触发冲突拦截；Keep 后 baseline 前进 |
-| **会话** | 按 Provider 独立会话、Resume 选择器，状态持久化于 `.WSLDeck/` |
-| **终端** | **WSLDeck WSL** 配置 — Windows 下 `wsl.exe --cd`，WSL 内原生 shell |
-| **体验** | Markdown 渲染、` ```bash ` 一键 Run in Terminal、逐条复制、Thought 流式自动滚动 |
+| **Linux 运行时** | WSL 路径映射（`C:\` → `/mnt/c`、UNC）、工作区 cwd、**WSLDeck WSL** 终端、Doctor 环境检测 |
+| **Agent Provider** | 同一侧栏切换 Codex CLI 与 Cursor `agent acp`；按 Provider 独立会话与 Resume |
+| **IDE 体验** | 对话、Tool Activity、Markdown、` ```bash ` Run in Terminal、Thought 流式自动滚动、逐条复制 |
+| **变更安全** | Diff 卡片、Revision 栈、冲突检测、Keep / Cancel / Keep All（当前隔离：**Shadow Workspace**） |
 
 ## 快速开始
 
 ### 环境要求
 
-- VS Code **1.90+**（推荐 Remote - WSL）
-- [Codex CLI](https://github.com/openai/codex) 和/或 [Cursor CLI](https://cursor.com/docs/cli) 已加入 `PATH`
-- 已打开一个文件夹作为工作区（Remote-WSL 时使用 WSL 路径）
+- VS Code **1.90+**
+- **Linux/WSL 作为 Agent 执行环境**（推荐 Remote - WSL；或 Windows + WSL 桥接）
+- [Codex CLI](https://github.com/openai/codex) 和/或 [Cursor CLI](https://cursor.com/docs/cli) 已加入 Linux `PATH`
+- 已打开文件夹作为工作区（Remote-WSL 时使用 WSL 路径）
 
 ### 从源码安装
 
@@ -70,10 +84,10 @@ npx vsce package
 
 1. 点击活动栏 **WSLDeck** 图标 → 打开 **Agent**
 2. 选择 **Codex** 或 **Cursor**，点选模型芯片，输入提示词
-3. 在每条 Agent 回复下方的折叠面板中审查变更
-4. 对每个文件 **Keep** 或 **Cancel**（同一面板内待处理项可批量操作）
+3. Agent 在 Linux 环境执行；在每条 Agent 回复下方审查变更
+4. 对每个文件 **Keep** 或 **Cancel**（同一面板内可批量操作）
 
-若 CLI、WSL 工作目录或 Git 异常，可在命令面板运行 **WSLDeck: Doctor** 做健康检查。
+若 CLI、WSL 工作目录或 Git 异常，运行 **WSLDeck: Doctor** 做健康检查。
 
 ## 命令
 
@@ -101,20 +115,20 @@ npx vsce package
 | `wsldeck.codex.executable` | `codex` | 可执行文件路径或名称 |
 | `wsldeck.cursor.executable` | `agent` | Cursor CLI |
 | `wsldeck.cursor.apiKey` | — | 或使用环境变量 `CURSOR_API_KEY` |
-| `wsldeck.shadow.root` | — | 默认：`~/.local/share/wsldeck-extension` |
+| `wsldeck.shadow.root` | — | Shadow 根目录；默认 `~/.local/share/wsldeck-extension` |
 
 完整配置见 [package.json](package.json) 中的 `contributes.configuration`。
 
 ## 架构原则
 
-高层约束（请勿轻易打破）：
+高层约束（详见 [ARCHITECTURE.md](ARCHITECTURE.md)）：
 
 1. **不接管 Git** — 不自动 commit/push；VS Code SCM 仍是唯一真相源
-2. **Agent 不直接写 Main** — 影子工作区 → 审查 → Keep
-3. **Provider 可插拔** — 共享 `AgentProvider`、`ChangeTracker`、`ShadowWorkspaceManager`
+2. **变更须审查后应用** — v0.1.0 默认 Shadow 隔离，Keep 后才写入 Main
+3. **Provider 可插拔** — 共享 `AgentProvider`、`ChangeTracker`；隔离策略可演进
 4. **工具 UI 由元数据驱动** — 无硬编码 tool 枚举
 
-详细设计：[ARCHITECTURE.md](ARCHITECTURE.md) · 开发说明：[DEVELOPMENT.md](DEVELOPMENT.md)
+开发说明：[DEVELOPMENT.md](DEVELOPMENT.md)
 
 ## 开发
 

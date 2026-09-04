@@ -4,46 +4,56 @@
 
 **项目名：`WSLDeckExtension`**
 
-目标不是替代 VS Code、Git、Codex 或 Cursor，而是给 VS Code 增加一层统一的 **WSL AI Agent 工作流**：
+**WSLDeck 是 VS Code 与 Linux-native AI Coding Agent 之间的工作流层。**
+
+目标不是替代 VS Code、Git、Codex 或 Cursor，而是：
+
+- 让 Agent **原生运行在 Linux/WSL**（shell、文件系统、工具链）
+- 保留 **VS Code 完整开发体验**（Editor、Diff、SCM、终端 UI）
+- 在变更进入 Main 前提供 **可审查、可撤销** 的 Change Safety Layer
+
+判断功能是否属于主线：
+
+> WSLDeck 连接 VS Code UI 与 Linux-native Agent Runtime，并在变更进入用户工作区前提供审查与控制。
+
+### 三层核心能力（优先级）
+
+| 优先级 | 能力 |
+|--------|------|
+| 1 | **Linux-native Agent Execution** — Codex/Cursor 在 WSL/Linux 执行 |
+| 2 | **IDE-native Agent Experience** — 对话、Activity、终端、Diff 留在 VS Code |
+| 3 | **Controlled Agent Changes** — Diff、Keep/Cancel；Shadow 为 v0.1.0 默认隔离实现 |
+
+### 分层架构
 
 ```text
-VS Code
-├── 原生 Editor
-├── 原生 Git / SCM / Commit / Push
-├── 原生 Terminal
-│   └── WSL Terminal
-│
-└── WSLDeckExtension
-    └── Agent View
-        ├── Codex CLI
-        ├── Cursor CLI
-        ├── Conversation
-        └── Proposed Changes
-            ├── -XX +XXX
-            ├── 查看 Diff
-            ├── 取消
-            └── 确认
+          VS Code
+             │
+             │  Editor / Diff / SCM / UI
+             ▼
+      WSLDeck Runtime Bridge
+             │
+             ▼
+      Linux / WSL Environment
+             │
+     ┌───────┼────────┐
+     │       │        │
+   Codex   Cursor   Shell / Tools
+     │       │        │
+     └───────┼────────┘
+             │
+      Linux Workspace
+             │
+      Change Safety Layer
+       ├── Shadow（当前默认）
+       ├── Change Tracking / Diff Review
+       └── Keep / Cancel
+             │
+             ▼
+      Main Workspace → VS Code Native Git
 ```
 
-核心状态模型固定为：
-
-```text
-Agent
-  ↓
-Shadow Workspace
-  ↓
-Proposed Changes
-  │
-  ├─ Cancel → 丢弃
-  │
-  └─ Accept
-         ↓
-   Main Workspace
-         ↓
-  VS Code 原生 Git
-         ↓
- Commit / Push
-```
+详细架构与原则见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
 
