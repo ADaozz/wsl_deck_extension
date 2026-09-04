@@ -1,0 +1,190 @@
+{
+  "name": "wsldeck-extension",
+  "displayName": "WSLDeck",
+  "description": "Unified WSL AI Agent workflow for VS Code — Codex, Cursor, Shadow Workspace, Proposed Changes",
+  "version": "0.1.0",
+  "publisher": "wsldeck",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ADaozz/wsl_deck_extension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ADaozz/wsl_deck_extension/issues"
+  },
+  "homepage": "https://github.com/ADaozz/wsl_deck_extension#readme",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:wsldeck.agentView",
+    "onCommand:wsldeck.show",
+    "onCommand:wsldeck.doctor",
+    "onCommand:wsldeck.showAgentLog",
+    "onCommand:wsldeck.openWslTerminal",
+    "onTerminalProfile:wsldeck.wslTerminal"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "wsldeck.show",
+        "title": "WSLDeck: Show",
+        "icon": {
+          "light": "media/icon.svg",
+          "dark": "media/icon.svg"
+        }
+      },
+      {
+        "command": "wsldeck.doctor",
+        "title": "WSLDeck: Doctor"
+      },
+      {
+        "command": "wsldeck.showAgentLog",
+        "title": "WSLDeck: Show Agent Log"
+      },
+      {
+        "command": "wsldeck.openWslTerminal",
+        "title": "WSLDeck: Open WSL Terminal"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "wsldeck",
+          "title": "WSLDeck",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "wsldeck": [
+        {
+          "type": "webview",
+          "id": "wsldeck.agentView",
+          "name": "Agent",
+          "contextualTitle": "WSLDeck",
+          "visibility": "visible",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "wsldeck.showAgentLog",
+          "when": "view == wsldeck.agentView",
+          "group": "navigation"
+        },
+        {
+          "command": "wsldeck.openWslTerminal",
+          "when": "view == wsldeck.agentView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "terminal": {
+      "profiles": [
+        {
+          "id": "wsldeck.wslTerminal",
+          "title": "WSLDeck WSL",
+          "icon": "terminal-linux"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "WSLDeck",
+      "properties": {
+        "wsldeck.agent.defaultProvider": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "cursor"
+          ],
+          "default": "codex",
+          "description": "Default agent provider"
+        },
+        "wsldeck.codex.executable": {
+          "type": "string",
+          "default": "codex",
+          "description": "Codex CLI executable name or path"
+        },
+        "wsldeck.codex.models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fallback Codex model ids if `codex debug models` is unavailable"
+        },
+		"wsldeck.cursor.executable": {
+          "type": "string",
+          "default": "agent",
+          "description": "Cursor agent CLI executable name or path"
+        },
+        "wsldeck.cursor.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Cursor API key for SDK model catalog (fallback: CURSOR_API_KEY env). Create at Cursor Dashboard → Integrations."
+        },
+        "wsldeck.cursor.models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Fallback Cursor model ids if `agent --list-models` is unavailable"
+        },
+        "wsldeck.agent.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred model id when present in the provider model list"
+        },
+        "wsldeck.wsl.distribution": {
+          "type": "string",
+          "default": "",
+          "description": "Preferred WSL distribution (empty = default)"
+        },
+        "wsldeck.shadow.root": {
+          "type": "string",
+          "default": "",
+          "description": "Shadow workspace root (empty = ~/.local/share/wsldeck-extension; keep outside the opened folder)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && node esbuild.js",
+    "compile-tests": "tsc -p tsconfig.test.json",
+    "check-types": "tsc --noEmit",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --preserveWatchOutput",
+    "package": "npm run check-types && node esbuild.js --production",
+    "lint": "eslint src webview",
+    "test": "vscode-test",
+    "pretest": "npm run compile && npm run compile-tests && npm run lint"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.13.10",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.2",
+    "esbuild": "^0.25.1",
+    "eslint": "^9.22.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.26.1"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.30",
+    "marked": "^9.1.6"
+  }
+}

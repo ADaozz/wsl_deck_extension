@@ -1,0 +1,10 @@
+.cursor/
+node_modules
+dist
+out
+.vscode-test
+*.vsix
+*.log
+.DS_Store
+.DS_Store?
+Thumbs.db
