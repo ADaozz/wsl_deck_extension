@@ -4,30 +4,45 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { detectProposedChanges } from '../change/changeTracker';
 import { testProposedChange } from './testProposedChange';
-import type { ShadowWorkspace } from '../shadow/shadowWorkspaceManager';
+import { testSnapshotBaseline } from './testSessionBaseline';
 
 suite('changeTracker', () => {
-	test('detectCopyChanges preserves accepted state on refresh', async () => {
+	test('detectSnapshotChanges ignores pre-session dirty files', async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wsldeck-chg-dirty-'));
+		try {
+			const main = path.join(root, 'main');
+			fs.mkdirSync(main);
+			fs.writeFileSync(path.join(main, 'dirty.txt'), 'user edit before session\n', 'utf8');
+			fs.writeFileSync(path.join(main, 'clean.txt'), 'same\n', 'utf8');
+
+			const baseline = testSnapshotBaseline(root, 'sess-dirty');
+			const { baselineDir } = baseline;
+			assert.ok(baselineDir);
+			fs.writeFileSync(path.join(baselineDir, 'dirty.txt'), 'user edit before session\n', 'utf8');
+			fs.writeFileSync(path.join(baselineDir, 'clean.txt'), 'same\n', 'utf8');
+
+			// Agent only touches agent.txt
+			fs.writeFileSync(path.join(main, 'agent.txt'), 'agent\n', 'utf8');
+
+			const changes = await detectProposedChanges(baseline);
+			assert.deepStrictEqual(
+				changes.map((c) => c.path).sort(),
+				['agent.txt'],
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('detectSnapshotChanges preserves accepted state on refresh', async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wsldeck-chg-'));
 		try {
-			const mainCwd = path.join(root, 'main');
-			const shadowCwd = path.join(root, 'shadow');
-			const baselineRoot = path.join(root, 'shadow.baseline');
-			fs.mkdirSync(mainCwd, { recursive: true });
-			fs.mkdirSync(shadowCwd, { recursive: true });
-			fs.mkdirSync(baselineRoot, { recursive: true });
+			const baseline = testSnapshotBaseline(root, 'sess-copy-1');
+			const { mainCwd, baselineDir } = baseline;
+			assert.ok(baselineDir);
 
-			fs.writeFileSync(path.join(mainCwd, 'a.txt'), 'main\n', 'utf8');
-			fs.writeFileSync(path.join(baselineRoot, 'a.txt'), 'baseline\n', 'utf8');
-			fs.writeFileSync(path.join(shadowCwd, 'a.txt'), 'shadow edit\n', 'utf8');
-
-			const shadow: ShadowWorkspace = {
-				sessionId: 'sess-copy-1',
-				mainCwd,
-				shadowCwd,
-				kind: 'copy',
-				createdAt: Date.now(),
-			};
+			fs.writeFileSync(path.join(mainCwd, 'a.txt'), 'agent edit\n', 'utf8');
+			fs.writeFileSync(path.join(baselineDir, 'a.txt'), 'baseline\n', 'utf8');
 
 			const previous = [
 				testProposedChange({
@@ -35,12 +50,11 @@ suite('changeTracker', () => {
 					additions: 1,
 					deletions: 1,
 					state: 'accepted',
-					shadowPath: path.join(shadowCwd, 'a.txt'),
 					mainPath: path.join(mainCwd, 'a.txt'),
 				}),
 			];
 
-			const changes = await detectProposedChanges(shadow, { previous });
+			const changes = await detectProposedChanges(baseline, { previous });
 			assert.strictEqual(changes.length, 1);
 			assert.strictEqual(changes[0].state, 'accepted');
 		} finally {
@@ -48,27 +62,15 @@ suite('changeTracker', () => {
 		}
 	});
 
-	test('detectCopyChanges preserves conflicted state on refresh', async () => {
+	test('detectSnapshotChanges preserves conflicted state on refresh', async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wsldeck-chg-'));
 		try {
-			const mainCwd = path.join(root, 'main');
-			const shadowCwd = path.join(root, 'shadow');
-			const baselineRoot = path.join(root, 'shadow.baseline');
-			fs.mkdirSync(mainCwd, { recursive: true });
-			fs.mkdirSync(shadowCwd, { recursive: true });
-			fs.mkdirSync(baselineRoot, { recursive: true });
+			const baseline = testSnapshotBaseline(root, 'sess-copy-2');
+			const { mainCwd, baselineDir } = baseline;
+			assert.ok(baselineDir);
 
-			fs.writeFileSync(path.join(mainCwd, 'b.txt'), 'user edit\n', 'utf8');
-			fs.writeFileSync(path.join(baselineRoot, 'b.txt'), 'baseline\n', 'utf8');
-			fs.writeFileSync(path.join(shadowCwd, 'b.txt'), 'shadow edit\n', 'utf8');
-
-			const shadow: ShadowWorkspace = {
-				sessionId: 'sess-copy-2',
-				mainCwd,
-				shadowCwd,
-				kind: 'copy',
-				createdAt: Date.now(),
-			};
+			fs.writeFileSync(path.join(mainCwd, 'b.txt'), 'current\n', 'utf8');
+			fs.writeFileSync(path.join(baselineDir, 'b.txt'), 'baseline\n', 'utf8');
 
 			const previous = [
 				testProposedChange({
@@ -76,12 +78,11 @@ suite('changeTracker', () => {
 					additions: 1,
 					deletions: 1,
 					state: 'conflicted',
-					shadowPath: path.join(shadowCwd, 'b.txt'),
 					mainPath: path.join(mainCwd, 'b.txt'),
 				}),
 			];
 
-			const changes = await detectProposedChanges(shadow, { previous });
+			const changes = await detectProposedChanges(baseline, { previous });
 			assert.strictEqual(changes.length, 1);
 			assert.strictEqual(changes[0].state, 'conflicted');
 		} finally {

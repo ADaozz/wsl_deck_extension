@@ -3,13 +3,13 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import * as os from 'node:os';
 import { sessionDeckDir } from '../state/workspaceDeckStore';
+import type { SessionBaseline } from '../session/sessionBaseline';
 import {
 	type ChangeRevision,
 	type ProposedChange,
 	revisionIdForTurn,
 } from './proposedChange';
 import { baselineContentFor } from './changeActions';
-import type { ShadowWorkspace } from '../shadow/shadowWorkspaceManager';
 import { roughLineDiff } from './changeTracker';
 
 export function sessionSnapshotsDir(mainCwd: string, sessionId: string): string {
@@ -58,7 +58,7 @@ export function readRevisionSnapshot(
 }
 
 async function turnStartContent(
-	shadow: ShadowWorkspace,
+	baseline: SessionBaseline,
 	change: ProposedChange,
 	prevRevisions: ChangeRevision[],
 	mainCwd: string,
@@ -71,15 +71,12 @@ async function turnStartContent(
 			return snap;
 		}
 	}
-	const baseline = await baselineContentFor(shadow, change.path);
-	return baseline ?? '';
+	const base = await baselineContentFor(baseline, change.path);
+	return base ?? '';
 }
 
-/**
- * Merge detected rows with previous deck state: one card per path, append/update revision per turn.
- */
 export async function enrichChangesWithRevisions(
-	shadow: ShadowWorkspace,
+	baseline: SessionBaseline,
 	previous: ProposedChange[],
 	detected: ProposedChange[],
 	ctx: {
@@ -104,15 +101,16 @@ export async function enrichChangesWithRevisions(
 			const snapshotId = revisionIdForTurn(ctx.turnId);
 			const existingIdx = revisions.findIndex((r) => r.turnId === ctx.turnId);
 			const startText = await turnStartContent(
-				shadow,
+				baseline,
 				row,
 				existingIdx >= 0 ? revisions.slice(0, existingIdx) : revisions,
 				ctx.mainCwd,
 				ctx.sessionId,
 			);
-			const endText = fs.existsSync(row.shadowPath) && fs.statSync(row.shadowPath).isFile()
-				? fs.readFileSync(row.shadowPath, 'utf8')
-				: '';
+			const endText =
+				fs.existsSync(row.mainPath) && fs.statSync(row.mainPath).isFile()
+					? fs.readFileSync(row.mainPath, 'utf8')
+					: '';
 			const { additions, deletions } = roughLineDiff(startText, endText);
 
 			writeRevisionSnapshot(
@@ -120,7 +118,7 @@ export async function enrichChangesWithRevisions(
 				ctx.sessionId,
 				snapshotId,
 				row.path,
-				row.shadowPath,
+				row.mainPath,
 			);
 
 			const revision: ChangeRevision = {
@@ -151,7 +149,6 @@ export async function enrichChangesWithRevisions(
 		});
 	}
 
-	// Keep accepted-only cards that disappeared from detect but have revision history.
 	for (const prev of previous) {
 		if (out.some((c) => c.path === prev.path)) {
 			continue;
@@ -165,7 +162,7 @@ export async function enrichChangesWithRevisions(
 }
 
 export function revisionBaselineContent(
-	shadow: ShadowWorkspace,
+	baseline: SessionBaseline,
 	change: ProposedChange,
 	revision: ChangeRevision,
 	mainCwd: string,
@@ -179,7 +176,7 @@ export function revisionBaselineContent(
 			return Promise.resolve(text);
 		}
 	}
-	return baselineContentFor(shadow, change.path);
+	return baselineContentFor(baseline, change.path);
 }
 
 export function revisionEndSnapshotPath(
@@ -195,16 +192,15 @@ export function revisionEndSnapshotPath(
 	return fs.existsSync(p) ? p : undefined;
 }
 
-/** Diff for one revision: prior snapshot (or baseline) vs this revision snapshot. */
 export async function viewRevisionDiff(
-	shadow: ShadowWorkspace,
+	baseline: SessionBaseline,
 	change: ProposedChange,
 	revision: ChangeRevision,
 	mainCwd: string,
 	sessionId: string,
 ): Promise<void> {
 	const leftContent =
-		(await revisionBaselineContent(shadow, change, revision, mainCwd, sessionId)) ?? '';
+		(await revisionBaselineContent(baseline, change, revision, mainCwd, sessionId)) ?? '';
 	const rightPath = revisionEndSnapshotPath(mainCwd, sessionId, revision, change.path);
 	const tmpDir = path.join(os.tmpdir(), 'wsldeck-diff');
 	fs.mkdirSync(tmpDir, { recursive: true });
@@ -215,8 +211,8 @@ export async function viewRevisionDiff(
 	fs.writeFileSync(leftPath, leftContent, 'utf8');
 	if (rightPath && fs.existsSync(rightPath)) {
 		fs.copyFileSync(rightPath, rightTmp);
-	} else if (fs.existsSync(change.shadowPath)) {
-		fs.copyFileSync(change.shadowPath, rightTmp);
+	} else if (fs.existsSync(change.mainPath)) {
+		fs.copyFileSync(change.mainPath, rightTmp);
 	} else {
 		fs.writeFileSync(rightTmp, '', 'utf8');
 	}

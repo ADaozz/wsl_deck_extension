@@ -23,8 +23,6 @@ export interface ProposedChange {
 	additions: number;
 	deletions: number;
 	state: ChangeState;
-	/** Absolute path in shadow workspace */
-	shadowPath: string;
 	/** Absolute path in main workspace */
 	mainPath: string;
 	/** First time this path appeared in the session deck */

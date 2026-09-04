@@ -25,7 +25,7 @@ export type WslPathHostKind = 'local-windows' | 'local-linux' | 'wsl-remote' | '
 
 /**
  * Convert a host filesystem path to a Linux path for WSL CLI / Agent cwd.
- * On local-windows, Windows paths (e.g. shadow under %USERPROFILE%) become /mnt/...
+ * On local-windows, Windows paths (e.g. workspace under D:\) become /mnt/...
  * On other hosts, returns the path unchanged (already Linux inside WSL/remote).
  */
 export function toWslLinuxPath(

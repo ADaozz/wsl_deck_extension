@@ -67,7 +67,7 @@ export function isFileChangeToolName(name: string): boolean {
 }
 
 /**
- * Re-scan shadow workspace after any tool completes.
+ * Re-scan workspace after any tool completes.
  * File add/delete/modify is detected from disk — not from tool title/kind enums.
  */
 export function shouldRefreshChangesForTool(_tool: ToolMetadata): boolean {

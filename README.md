@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.3-blue" alt="version 0.1.3" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version 0.2.0" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
-  <img src="https://img.shields.io/badge/tests-90%20passing-brightgreen" alt="90 tests" />
+  <img src="https://img.shields.io/badge/tests-97%20passing-brightgreen" alt="97 tests" />
   <img src="https://img.shields.io/badge/platform-WSL%20%7C%20Linux%20%7C%20Remote--WSL-informational" alt="platform" />
 </p>
 
@@ -35,13 +35,14 @@ Linux Workspace
 
 ### 变更如何被安全管理
 
-AI 改代码不应是黑盒。WSLDeck 在变更进入主工作区前提供 **Change Safety Layer**：
+AI 改代码不应是黑盒。WSLDeck 提供 **Change Safety Layer**：
 
-- 检测 Agent 产生的文件变更，展示 Diff 卡片
-- 按轮次 Revision 历史、时间戳、View Diff
-- **Keep** 写入 Main，**Cancel** 丢弃；Git 仍由 VS Code 与你掌控
+- Agent **直接编辑**当前工作区文件
+- 会话开始时记录 **baseline**（工作区快照到 `.WSLDeck/sessions/<id>/baseline/`），Diff 卡片只显示相对会话起点的变更（与 Git commit/status 无关）
+- Diff 卡片 + 按轮次 **Revision** 历史、View Diff
+- **Keep** 确认/收起卡片；**Cancel** 从 baseline **恢复**文件
 
-**v0.1.0** 默认通过 **Shadow Workspace** 隔离 Agent 编辑（Main 仅在 Keep 时更新）。Shadow 是隔离策略的一种实现，不是 WSLDeck 存在的唯一理由——**Linux-native Runtime 才是**。
+**Linux-native Runtime** 是 WSLDeck 的核心价值——Agent 在 WSL 里跑 bash/git，与 VS Code 工作区路径对齐。
 
 ## 功能概览
 
@@ -50,7 +51,7 @@ AI 改代码不应是黑盒。WSLDeck 在变更进入主工作区前提供 **Cha
 | **Linux 运行时** | WSL 路径映射（`C:\` → `/mnt/c`、UNC）、工作区 cwd、**WSLDeck WSL** 终端、Doctor 环境检测；Windows 本机经 **Agent env resolver** 从 WSL login shell 注入 `PATH`/proxy |
 | **Agent Provider** | 同一侧栏切换 Codex CLI 与 Cursor `agent acp`；按 Provider 独立会话与 Resume |
 | **IDE 体验** | 对话、Tool Activity、Markdown、` ```bash ` Run in Terminal、Thought 流式自动滚动、逐条复制 |
-| **变更安全** | Diff 卡片、Revision 栈、冲突检测、Keep / Cancel / Keep All（当前隔离：**Shadow Workspace**） |
+| **变更安全** | Diff 卡片、Revision 栈、Keep（确认）/ Cancel（恢复 baseline） |
 
 ## 快速开始
 
@@ -118,10 +119,9 @@ npx vsce package
 | `wsldeck.agent.defaultProvider` | `codex` | `codex` \| `cursor` |
 | `wsldeck.codex.executable` | `codex` | 可执行文件路径或名称 |
 | `wsldeck.cursor.executable` | `agent` | Cursor CLI |
-| `wsldeck.cursor.apiKey` | — | 或使用环境变量 `CURSOR_API_KEY` |
+| `wsldeck.cursor.apiKey` | — | Cursor SDK 模型目录 API key；不用于 ACP 会话认证 |
 | `wsldeck.agent.env` | `{}` | 注入/覆盖 WSL 内 Agent 环境变量（见下文 **代理配置**） |
 | `wsldeck.agent.logEnv` | `false` | 首次 CLI 启动时在 Agent Log 打印 env 摘要（密钥打码） |
-| `wsldeck.shadow.root` | — | Shadow 根目录；默认 `~/.local/share/wsldeck-extension` |
 
 完整配置见 [package.json](package.json) 中的 `contributes.configuration`。
 
@@ -199,12 +199,35 @@ WSLDeck 会探测 login shell 的 env 并注入 Codex/Cursor；`wsldeck.agent.en
 
 WSLDeck **不会**自动同步 Windows 系统代理设置；需按上表在 WSL env 或 `wsldeck.agent.env` 中显式配置。
 
+#### Cursor ACP 认证说明
+
+- 使用 Cursor 前先在同一个 Linux / WSL 环境运行 **`agent login`**。
+- WSLDeck 复用 CLI 保存的登录状态；当 `initialize` 返回 `cursor_login` 时，按协议执行 **`initialize` → `authenticate(cursor_login)` → `session/new|load`**。这里的 `authenticate` 只加载已有 CLI 凭据，不会重新拉起登录。
+- ACP 进程固定设置 `NO_OPEN_BROWSER=1`，不会自动打开认证网页；凭据失效时请在终端手动重新运行 `agent login`。
+- 启动 `agent acp` 时会清除 `CURSOR_API_KEY`，避免 API key 覆盖 CLI 登录态；`wsldeck.cursor.apiKey` 和环境变量中的 key 仅用于 SDK 模型目录。
+
+若日志出现 `Authentication required` 或 `Failed to open browser for login`，请确认登录命令与插件使用的是**同一个 WSL 发行版和用户**：
+
+```bash
+whoami
+agent status
+agent login   # 仅在 status 显示 Not logged in 时执行
+```
+
+Windows 本机 VS Code 还需确认 `wsldeck.wsl.distribution` 指向执行上述命令的发行版。登录完成后执行 **Developer: Reload Window** 重载扩展。配置文件中残留的用户信息不代表 token 仍然有效，以 `agent status` 为准。
+
+#### Provider 运行说明
+
+- Cursor 和 Codex 各自维护独立 session；切换 Provider 不会丢失后台回复或工具事件。
+- 同一 Provider 一次只允许一个 Prompt，防止两个进程同时写工作区或覆盖 resume 状态。
+- Cursor ACP 意外退出或初始化失败后会清理旧进程，并在下一次调用时重新建立连接。
+
 ## 架构原则
 
 高层约束（详见 [ARCHITECTURE.md](ARCHITECTURE.md)）：
 
 1. **不接管 Git** — 不自动 commit/push；VS Code SCM 仍是唯一真相源
-2. **变更须审查后应用** — v0.1.0 默认 Shadow 隔离，Keep 后才写入 Main
+2. **变更须审查与控制** — Agent 直接编辑 Main；会话 baseline 对比检测；Keep 确认、Cancel 恢复
 3. **Provider 可插拔** — 共享 `AgentProvider`、`ChangeTracker`；隔离策略可演进
 4. **工具 UI 由元数据驱动** — 无硬编码 tool 枚举
 
@@ -215,7 +238,7 @@ WSLDeck **不会**自动同步 Windows 系统代理设置；需按上表在 WSL 
 ```bash
 npm install
 npm run compile      # 类型检查 + esbuild
-npm test             # 89 项测试（@vscode/test-electron）
+npm test             # 97 项测试（@vscode/test-electron）
 npm run watch        # esbuild + tsc 监听
 npm run lint
 ```

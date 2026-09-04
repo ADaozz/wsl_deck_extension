@@ -7,6 +7,8 @@ suite('change path filter + codex reasoning catalog', () => {
 		assert.ok(isIgnoredChangePath('.WSLDeck/resumes.json'));
 		assert.ok(isIgnoredChangePath('WSLDeckExtension/out/agent/foo.js'));
 		assert.ok(isIgnoredChangePath('WSLDeckExtension/.vscode-test/user-data/Cache/Cache_Data/x'));
+		assert.ok(isIgnoredChangePath('.artifacts/output.tar.gz'));
+		assert.ok(isIgnoredChangePath('.run/App.run.xml'));
 		assert.ok(!isIgnoredChangePath('WSLDeckExtension/src/agent/agentSessionManager.ts'));
 	});
 

@@ -7,6 +7,7 @@ import type {
 } from '../../agentProvider';
 import type { AgentEvent } from '../../agentEvents';
 import type { AgentRawLog } from '../../agentRawLog';
+import { sanitizeAgentLogLine } from '../../agentLogSanitize';
 import { createAgentSession, type AgentSession } from '../../agentSession';
 import {
 	modelsFromConfigFallback,
@@ -84,10 +85,7 @@ function collectCodexFailureReason(stderrLines: string[], exitCode: number): str
 		);
 	}
 	if (exitCode !== 0 && /timeout waiting for child process/i.test(joined)) {
-		return (
-			'Codex 刷新模型列表超时（Shadow 在 /mnt/c 上时较常见）。' +
-			'可设置 wsldeck.shadow.root 为 WSL 内路径，或执行 /new 后重试。'
-		);
+		return 'Codex 刷新模型列表超时。请检查 WSL/网络或执行 /new 后重试。';
 	}
 	return undefined;
 }
@@ -236,6 +234,7 @@ export class CodexProvider implements AgentProvider {
 			linuxEnv = await this.resolveAgentEnv(cliCtx);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			session.status = 'FAILED';
 			yield {
 				type: 'session.failed',
 				sessionId: session.id,
@@ -250,6 +249,7 @@ export class CodexProvider implements AgentProvider {
 			argv = await resolveLinuxArgv(cliCtx, exe, args, linuxEnv);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			session.status = 'FAILED';
 			yield {
 				type: 'session.failed',
 				sessionId: session.id,
@@ -260,6 +260,7 @@ export class CodexProvider implements AgentProvider {
 		}
 
 		if (!argv) {
+			session.status = 'FAILED';
 			yield {
 				type: 'session.failed',
 				sessionId: session.id,
@@ -300,7 +301,6 @@ export class CodexProvider implements AgentProvider {
 		let done = false;
 		let exitCode = 0;
 		let runError: Error | undefined;
-		let agentText = '';
 		const stderrLines: string[] = [];
 
 		const push = (event: AgentEvent) => {
@@ -348,7 +348,6 @@ export class CodexProvider implements AgentProvider {
 				if (parsed.type === 'item.completed' && parsed.item) {
 					const item = parsed.item;
 					if (item.type === 'agent_message' && typeof item.text === 'string') {
-						agentText = item.text;
 						push({
 							type: 'agent.message.delta',
 							sessionId: session.id,
@@ -412,16 +411,17 @@ export class CodexProvider implements AgentProvider {
 				}
 			},
 			onStderrLine: (line) => {
+				const safe = sanitizeAgentLogLine(line);
 				stderrLines.push(line);
 				if (isCodexBackendError(line)) {
 					if (!mcpReminded) {
 						mcpReminded = true;
 						this.log?.line('codex', '--', CODEX_MCP_REMINDER);
 					}
-					this.log?.line('codex', '--', line);
+					this.log?.line('codex', '--', safe);
 					return;
 				}
-				this.log?.line('codex', '!!', line);
+				this.log?.line('codex', '!!', safe);
 			},
 		});
 		this.activeExec = exec;
@@ -505,7 +505,7 @@ export class CodexProvider implements AgentProvider {
 			yield* this.sendPromptOnce(session, prompt, options, true);
 			return;
 		}
-		if ((exitCode !== 0 && !agentText) || failedEarly) {
+		if (exitCode !== 0) {
 			if (!failedEarly) {
 				this.stopActiveExec();
 			}

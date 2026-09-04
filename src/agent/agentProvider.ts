@@ -21,7 +21,7 @@ export interface AgentSessionContext {
 	/** Cwd for spawning long-lived CLI/ACP processes (usually workspace root). */
 	acpSpawnCwd?: string;
 	modelId?: string;
-	/** Stable WSLDeck resume / shadow id (must match UI lane.sessionId). */
+	/** Stable WSLDeck resume / session id (must match UI lane.sessionId). */
 	sessionId?: string;
 	/** Opaque resume id from a previous provider session */
 	resumeProviderSessionId?: string;

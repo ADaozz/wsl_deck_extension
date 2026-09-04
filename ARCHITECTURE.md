@@ -16,7 +16,7 @@ WSLDeck 不重新造 IDE，不重新造 Agent，也不重新造 Git。它把 VS 
 
 而不是：
 
-> WSLDeck 是一个用 Shadow Workspace 防止 Agent 直接改代码的 VS Code 插件。
+> WSLDeck 是一个让 Agent 直接改工作区、再用 baseline Diff 卡片做审查与撤销的 VS Code 插件。
 
 ---
 
@@ -26,7 +26,7 @@ WSLDeck 不重新造 IDE，不重新造 Agent，也不重新造 Git。它把 VS 
 |--------|------|------|
 | 1 | **Linux-native Agent Execution** | Agent 在 Linux shell、Linux 文件系统、Linux PATH 与工具链中运行 |
 | 2 | **IDE-native Agent Experience** | 用户不离开 VS Code：对话、Tool Activity、终端、Diff、SCM |
-| 3 | **Controlled Agent Changes** | AI 修改可检测、可 Diff、可 Keep / Cancel；Shadow 属于本层的**当前实现** |
+| 3 | **Controlled Agent Changes** | AI 修改可检测、可 Diff、可 Keep / Cancel；会话 baseline + Main 直改 |
 
 ---
 
@@ -53,14 +53,14 @@ WSLDeck 不重新造 IDE，不重新造 Agent，也不重新造 Git。它把 VS 
       Agent Changes（检测）
              │
       Change Safety Layer
-       ├── Shadow Workspace（v0.1.0 默认隔离策略）
+       ├── Session Baseline（Git HEAD 或 `.WSLDeck` 快照）
        ├── Change Tracking
        ├── Diff Review
-       ├── Cancel
-       └── Keep
+       ├── Cancel（从 baseline 恢复 Main）
+       └── Keep（确认/收起）
              │
              ▼
-      Main Workspace
+      Main Workspace（Agent 直接编辑）
              │
              ▼
       VS Code Native Git
@@ -74,7 +74,7 @@ WSLDeck 不重新造 IDE，不重新造 Agent，也不重新造 Git。它把 VS 
 | **WSLDeck** | Agent 编排、会话、Provider 桥接、变更审查 UI、WSL 路径/cwd 映射、**Agent env resolver**（Windows 本机注入 WSL login shell 环境） |
 | **Linux / WSL** | Agent 进程、shell、文件系统、权限模型、工具链（grep、git、pytest、docker…） |
 | **Codex / Cursor** | 推理与 Agent execution（CLI） |
-| **Change Safety Layer** | 隔离、跟踪、Diff、Keep / Cancel（Shadow 为当前隔离实现） |
+| **Change Safety Layer** | 会话 baseline、跟踪、Diff、Keep（确认）/ Cancel（恢复 Main） |
 | **Git** | 仍由 VS Code SCM 与用户掌控；WSLDeck 不 commit / push |
 
 ---
@@ -104,16 +104,14 @@ Git 归属权留在 VS Code Source Control。
 
 ### 2. 变更须经审查后再应用
 
-Agent 产生的文件变更必须经 Change Safety Layer 检测与展示，用户确认（Keep）后才进入 Main Workspace。
-
-**v0.1.0 当前默认**：通过 Shadow Workspace 隔离 Agent 编辑，Main 仅在 Keep 时更新。这是 `ChangeIsolation` 的一种实现，**不是**不可替换的永恒架构假设（见下文「目标抽象」）。
+Agent 产生的文件变更必须经 Change Safety Layer 检测与展示。Agent **直接编辑 Main**；会话开始时记录 baseline（Git HEAD 或 `.WSLDeck/sessions/<id>/baseline/` 快照）。**Keep** 确认/收起卡片；**Cancel** 从 baseline 恢复 Main 文件。
 
 ### 3. Keep / Cancel 不是 Git 操作
 
 | 操作 | 含义 |
 |------|------|
-| Cancel | 丢弃 AI 提案变更 |
-| Keep | 将 AI 变更应用到工作区 |
+| Cancel | 从会话 baseline **快照**恢复 Main 文件（非 git checkout） |
+| Keep | 确认/收起 Diff 卡片（Main 已是 Agent 改后内容；**不 commit**） |
 | Git Restore | 恢复 Git 工作树 |
 | Commit | 创建 Git 版本 |
 
@@ -124,16 +122,23 @@ Agent 产生的文件变更必须经 Change Safety Layer 检测与展示，用�
 - `AgentSessionManager`
 - `AgentProvider`
 - `ChangeTracker`
-- `ShadowWorkspaceManager`（当前 `ChangeIsolation` 的 Shadow 实现）
+- `SessionBaselineManager`（会话开始时捕获 Git HEAD 或文件树快照）
 
 已接入 Provider：
 
 - `CodexProvider` — `codex exec --json` / `codex exec resume <thread_id>`
-- `CursorProvider` — `agent acp`（JSON-RPC：initialize → authenticate → session/new|load → session/prompt）
+- `CursorProvider` — `agent acp`（复用 `agent login`；JSON-RPC：initialize → authenticate(cursor_login) → session/new|load → session/prompt）
 
 每个 Provider 在工作区内维护**独立**会话与 resume id；切换 Agent 不共享、不抢占另一 Provider 的进程。
 
-UI 不直接依赖 Codex/Cursor 进程类型。变更检测以 Change Engine（shadow baseline vs current）为准，不以 Provider 专有「文件已改」事件为唯一真相源。
+Provider 生命周期约束：
+
+- 同一 Provider 的 session 创建与 Cursor ACP 初始化必须复用 in-flight 操作，不能重复启动进程。
+- 同一 Provider 同时只允许一个 Prompt；Cursor 与 Codex 可各自运行，但事件始终归档到所属 lane。
+- ACP 子进程退出、初始化失败或 dispose 时必须清理 ready 状态并 reject pending RPC；下一次调用可安全重连。
+- Cancel 在 Provider 内去重，单个 turn 只发送一次 `session/cancel`。
+
+UI 不直接依赖 Codex/Cursor 进程类型。变更检测以 Change Engine（Main vs session baseline）为准，不以 Provider 专有「文件已改」事件为唯一真相源。
 
 ### 5. Tool / Activity UI 由元数据驱动
 
@@ -150,28 +155,24 @@ AgentRuntime
 AgentProvider
 WorkspaceEnvironment
 ChangeTracker
-ChangeIsolation      ← 隔离策略接口
+ChangeBaseline      ← 会话开始时的工作区快照
 ChangeApplicator
 
-ChangeIsolation（策略）
-├── ShadowWorkspaceStrategy    ← 当前默认
-├── GitWorktreeStrategy        ← 未来可能
-├── DirectWorkspaceStrategy    ← 未来可能
+ChangeBaseline（策略）
+├── GitHeadStrategy         ← 当前默认（Git 仓库）
+├── SnapshotStrategy        ← 当前默认（非 Git）
+├── GitWorktreeStrategy     ← 未来可能
 └── ContainerWorkspaceStrategy ← 未来可能
 ```
 
-例如用户未来可选：
+**当前默认**：Agent → Main（直接编辑）→ ChangeTracker（Main vs baseline）→ Review → Keep / Cancel
 
-- **Safe（当前）**：Agent → Shadow → Review → Main
-- **Direct**：Agent → Main → ChangeTracker → Review
-- **Container**：Agent → Container Workspace → Review → Main
-
-`ShadowWorkspaceManager` 对应：
+`SessionBaselineManager` 对应：
 
 ```text
-ChangeIsolation
+ChangeBaseline
         ↑
-ShadowWorkspaceIsolation（当前实现）
+GitHeadBaseline | SnapshotBaseline（当前实现）
 ```
 
 ---
@@ -184,7 +185,7 @@ ShadowWorkspaceIsolation（当前实现）
 | Agent Provider | [`src/agent/providers/providerFactory.ts`](src/agent/providers/providerFactory.ts)、[`src/agent/providers/codex/`](src/agent/providers/codex/)、[`src/agent/providers/cursor/`](src/agent/providers/cursor/) |
 | 会话与编排 | [`src/agent/agentSessionManager.ts`](src/agent/agentSessionManager.ts)、[`src/state/sessionStore.ts`](src/state/sessionStore.ts) |
 | Change Engine | [`src/change/changeTracker.ts`](src/change/changeTracker.ts)、[`src/change/changeRevisions.ts`](src/change/changeRevisions.ts)、[`src/change/changeActions.ts`](src/change/changeActions.ts)、[`src/change/baselineOverlay.ts`](src/change/baselineOverlay.ts) |
-| Change Isolation（当前） | [`src/shadow/shadowWorkspaceManager.ts`](src/shadow/shadowWorkspaceManager.ts)、[`src/shadow/shadowPaths.ts`](src/shadow/shadowPaths.ts) |
+| Session Baseline | [`src/session/sessionBaseline.ts`](src/session/sessionBaseline.ts)、[`src/session/sessionGit.ts`](src/session/sessionGit.ts)、[`src/session/workspaceCopy.ts`](src/session/workspaceCopy.ts) |
 | IDE 集成 | [`src/ui/agentViewProvider.ts`](src/ui/agentViewProvider.ts)、[`webview/`](webview/)、[`media/agent-view.css`](media/agent-view.css) |
 | 健康检查 | [`src/doctor/doctor.ts`](src/doctor/doctor.ts) |
 
@@ -203,5 +204,5 @@ VS Code Integration           ← 第二核心（为什么不离开 IDE）
         >
 Controlled Agent Changes      ← 第三核心（变更如何被管理）
         >
-Shadow Workspace（实现细节）  ← 当前默认隔离策略，可替换
+Session Baseline（实现细节）  ← Git HEAD 或 `.WSLDeck` 快照
 ```

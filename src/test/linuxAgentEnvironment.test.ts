@@ -52,6 +52,32 @@ suite('linuxAgentEnvironment', () => {
 		assert.strictEqual(cleared.HTTPS_PROXY, undefined);
 	});
 
+	test('caller can remove Cursor API keys from both probed and configured env', () => {
+		const fromProbe = mergeLinuxAgentEnvLayers(
+			{ CURSOR_API_KEY: 'probe-key' },
+			{},
+			{ CURSOR_API_KEY: undefined },
+		);
+		assert.strictEqual(fromProbe.CURSOR_API_KEY, undefined);
+
+		const fromSettings = mergeLinuxAgentEnvLayers(
+			{},
+			{ CURSOR_API_KEY: 'settings-key' },
+			{ CURSOR_API_KEY: undefined },
+		);
+		assert.strictEqual(fromSettings.CURSOR_API_KEY, undefined);
+	});
+
+	test('ACP overrides can disable browser login while clearing API keys', () => {
+		const merged = mergeLinuxAgentEnvLayers(
+			{ CURSOR_API_KEY: 'probe-key' },
+			{ NO_OPEN_BROWSER: '0' },
+			{ CURSOR_API_KEY: undefined, NO_OPEN_BROWSER: '1' },
+		);
+		assert.strictEqual(merged.CURSOR_API_KEY, undefined);
+		assert.strictEqual(merged.NO_OPEN_BROWSER, '1');
+	});
+
 	test('agentEnvForLog masks secrets and summarizes PATH', () => {
 		const summary = agentEnvForLog({
 			PATH: '/a:/b:/c',

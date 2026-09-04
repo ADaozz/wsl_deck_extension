@@ -24,9 +24,7 @@ import {
 import { detectProposedChanges } from '../change/changeTracker';
 import { enrichChangesWithRevisions, viewRevisionDiff } from '../change/changeRevisions';
 import type { ProposedChange } from '../change/proposedChange';
-import { normalizeActivityForDisplay, rewriteShadowPathsInText } from './activityDisplay';
-import { shadowSessionDir } from '../shadow/shadowPaths';
-import { ShadowWorkspaceManager } from '../shadow/shadowWorkspaceManager';
+import { SessionBaselineManager } from '../session/sessionBaseline';
 import {
 	isNoteworthySession,
 	migrateToWorkspaceSessions,
@@ -44,7 +42,6 @@ import {
 	type AgentModeId,
 	deleteSessionDeck,
 	listSessionDeckIds,
-	listShadowSessionIds,
 	materializeChanges,
 	readResumeIndex,
 	readSessionDeck,
@@ -52,7 +49,7 @@ import {
 	upsertResumeEntry,
 	writeSessionDeck,
 } from '../state/workspaceDeckStore';
-import { getWorkspaceContext, NO_WORKSPACE_FOLDER_HINT } from '../workspace/workspaceContext';
+import { getWorkspaceContext, hostFsPath, NO_WORKSPACE_FOLDER_HINT } from '../workspace/workspaceContext';
 import { runInWslTerminal } from '../terminal/terminalService';
 import {
 	activityFromTool,
@@ -116,7 +113,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
 	private selectedProviderId: string;
 	private readonly lanes = new Map<string, ProviderUiLane>();
-	private readonly shadows = new ShadowWorkspaceManager();
+	private readonly baselines = new SessionBaselineManager();
 	private statusDetail?: string;
 	private statusFlashToken = 0;
 	/** Debounced workspaceState + resume index writes (not every UI tick). */
@@ -148,27 +145,29 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 			this.persistTimer = undefined;
 			this.persistAll({ prune: false });
 		}
-		void this.shadows.disposeAll();
+		this.baselines.disposeAll();
 	}
 
-	/** One-shot: drop old in-workspace worktrees that spam SCM Diff. */
+	/** One-shot: drop legacy in-workspace shadow dirs from older WSLDeck versions. */
 	private async cleanupLegacyShadowsOnce(): Promise<void> {
 		if (this.legacyShadowsCleaned) {
 			return;
 		}
 		this.legacyShadowsCleaned = true;
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		if (!main) {
 			return;
 		}
+		const legacyRoot = path.join(main, '.WSLDeck', 'shadows');
+		if (!fs.existsSync(legacyRoot)) {
+			return;
+		}
 		try {
-			const n = await this.shadows.disposeLegacyInWorkspaceShadows(main);
-			if (n > 0) {
-				this.post({
-					type: 'toast',
-					message: `Cleaned ${n} legacy in-workspace shadow(s) (fixes Diff spam).`,
-				});
-			}
+			fs.rmSync(legacyRoot, { recursive: true, force: true });
+			this.post({
+				type: 'toast',
+				message: 'Removed legacy .WSLDeck/shadows directory.',
+			});
 		} catch {
 			// ignore
 		}
@@ -246,14 +245,36 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		await vscode.commands.executeCommand(`${VIEW_TYPE}.focus`);
 	}
 
-	/** Main workspace path (never mutated by the agent until Accept). */
-	private mainCwd(): string | undefined {
+	/** Main workspace path for extension-host fs / git (Windows fsPath when local-windows). */
+	private mainFsPath(): string | undefined {
+		return hostFsPath(getWorkspaceContext());
+	}
+
+	/** Linux path for WSL CLI / Agent cwd. */
+	private mainLinuxCwd(): string | undefined {
 		return getWorkspaceContext().linuxCwd;
 	}
 
-	/** @deprecated alias — prefer mainCwd / shadowCwd explicitly */
+	private baselineOpts() {
+		return {
+			mainLinuxCwd: this.mainLinuxCwd(),
+			distro: getWorkspaceContext().distro,
+		};
+	}
+
+	private async ensureSessionBaseline(sessionId: string, opts?: { recapture?: boolean }) {
+		const mainFs = this.mainFsPath();
+		if (!mainFs) {
+			return undefined;
+		}
+		return this.baselines.ensureBaseline(mainFs, sessionId, {
+			...this.baselineOpts(),
+			recapture: opts?.recapture,
+		});
+	}
+
 	private workspaceCwd(): string | undefined {
-		return this.mainCwd();
+		return this.mainLinuxCwd();
 	}
 
 	private toChangeCards(changes: ProposedChange[]): ProposedChangeCard[] {
@@ -277,70 +298,51 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		}));
 	}
 
-	private async ensureShadowCwd(sessionId: string): Promise<string | undefined> {
-		const main = this.mainCwd();
-		if (!main) {
-			return undefined;
-		}
-		const shadow = await this.shadows.ensureShadow(main, sessionId);
-		return shadow.shadowCwd;
-	}
-
-	private activityShadowCwd(sessionId: string): string | undefined {
-		const main = this.mainCwd();
-		if (!main) {
-			return undefined;
-		}
-		return this.shadows.get(sessionId)?.shadowCwd ?? shadowSessionDir(main, sessionId);
-	}
-
-	private normalizeActivity(item: ActivityItem, sessionId: string): ActivityItem {
-		return normalizeActivityForDisplay(item, this.activityShadowCwd(sessionId));
+	private normalizeActivity(item: ActivityItem, _sessionId: string): ActivityItem {
+		return item;
 	}
 
 	private async refreshChanges(
 		lane: ProviderUiLane,
 		ctx?: { turnId?: string; agentMsgId?: string },
 	): Promise<void> {
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		if (!main) {
 			return;
 		}
-		let shadow = this.shadows.get(lane.sessionId);
-		if (!shadow) {
+		let baseline = this.baselines.get(lane.sessionId);
+		if (!baseline) {
 			try {
-				await this.ensureShadowCwd(lane.sessionId);
-				shadow = this.shadows.get(lane.sessionId);
+				baseline = await this.ensureSessionBaseline(lane.sessionId);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
-				this.post({ type: 'toast', message: `Shadow workspace failed: ${message}` });
+				this.post({ type: 'toast', message: `Session baseline failed: ${message}` });
 				return;
 			}
 		}
-		if (!shadow) {
+		if (!baseline) {
 			this.post({
 				type: 'toast',
-				message: 'Shadow workspace unavailable — cannot detect file changes.',
+				message: 'Session baseline unavailable — cannot detect file changes.',
 			});
 			return;
 		}
 		try {
-			const turnId = ctx?.turnId ?? lane.activeTurnId;
-			const detected = await detectProposedChanges(shadow, {
+			const detected = await detectProposedChanges(baseline, {
 				previous: lane.changes,
-				turnId,
+				turnId: ctx?.turnId,
 			});
-			lane.changes = await enrichChangesWithRevisions(shadow, lane.changes, detected, {
-				turnId,
-				agentMsgId: ctx?.agentMsgId,
+			lane.changes = await enrichChangesWithRevisions(baseline, lane.changes, detected, {
 				mainCwd: main,
 				sessionId: lane.sessionId,
+				turnId: ctx?.turnId ?? lane.activeTurnId,
+				agentMsgId: ctx?.agentMsgId,
 			});
 			this.stampChangeStatsOnActivities(lane);
 			this.persistLaneDeck(lane);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			this.post({ type: 'toast', message: `Change detect failed: ${message}` });
+			this.post({ type: 'toast', message: `Change detection failed: ${message}` });
 		}
 	}
 
@@ -382,7 +384,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
 	/** Write change cards + pending permission under `<main>/.WSLDeck/sessions/<id>/ui.json`. */
 	private persistLaneDeck(lane: ProviderUiLane): void {
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		if (!main) {
 			return;
 		}
@@ -397,9 +399,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	/** Restore change/permission cards from `.WSLDeck`; reattach shadow only if it already exists. */
+	/** Restore change/permission cards from `.WSLDeck`. */
 	private async restoreLaneDeck(lane: ProviderUiLane): Promise<void> {
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		if (!main) {
 			return;
 		}
@@ -407,27 +409,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		if (!disk) {
 			return;
 		}
-		const existingShadow = shadowSessionDir(main, lane.sessionId);
-		const legacyShadow = path.join(main, '.WSLDeck', 'shadows', lane.sessionId);
-		const shadowOnDisk =
-			fs.existsSync(existingShadow) || fs.existsSync(legacyShadow);
-		if (shadowOnDisk) {
-			try {
-				await this.ensureShadowCwd(lane.sessionId);
-			} catch {
-				// Still show persisted cards with best-effort paths.
-			}
-		}
-		const shadow = this.shadows.get(lane.sessionId);
-		const shadowCwd = shadow?.shadowCwd ?? path.join(main, '.WSLDeck', '.shadow-pending');
-		lane.changes = materializeChanges(disk.changes, main, shadowCwd, disk.updatedAt);
+		lane.changes = materializeChanges(disk.changes, main, disk.updatedAt);
 		lane.pendingPermission = disk.pendingPermission ?? undefined;
-		if (shadow) {
-			try {
-				const detected = await detectProposedChanges(shadow, {
+		try {
+			const baseline = await this.ensureSessionBaseline(lane.sessionId);
+			if (baseline) {
+				const detected = await detectProposedChanges(baseline, {
 					previous: lane.changes,
 				});
-				const merged = await enrichChangesWithRevisions(shadow, lane.changes, detected, {
+				const merged = await enrichChangesWithRevisions(baseline, lane.changes, detected, {
 					mainCwd: main,
 					sessionId: lane.sessionId,
 				});
@@ -437,15 +427,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				} else {
 					lane.changes = merged.length > 0 ? merged : lane.changes;
 				}
-			} catch {
-				// keep disk snapshot
 			}
-		} else if (lane.changes.length > 0) {
-			const hasHistory = lane.changes.some((c) => c.revisions.length > 0);
-			if (!hasHistory) {
-				lane.changes = [];
-				this.persistLaneDeck(lane);
-			}
+		} catch {
+			// keep disk snapshot
 		}
 	}
 
@@ -513,13 +497,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	private async ensureProviderSession(providerId: string, lane: ProviderUiLane) {
-		const main = this.mainCwd();
-		const shadowCwd = await this.ensureShadowCwd(lane.sessionId);
+		const mainLinux = this.mainLinuxCwd();
+		await this.ensureSessionBaseline(lane.sessionId);
 		const session = await this.sessions.ensureSession(providerId, {
 			sessionId: lane.sessionId,
 			modelId: lane.modelId,
-			workspaceCwd: shadowCwd ?? main,
-			acpSpawnCwd: main,
+			workspaceCwd: mainLinux,
+			acpSpawnCwd: mainLinux,
 			resumeProviderSessionId: lane.providerSessionId,
 		});
 		if (providerId === 'cursor' && !this.cursorUsesSdkCatalog()) {
@@ -637,21 +621,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				activities: m.activities?.map((a) => this.normalizeActivity(a, lane.sessionId)),
 			})),
 			activities: lane.activities.map((a) => this.normalizeActivity(a, lane.sessionId)),
-			pendingPermission: lane.pendingPermission
-				? {
-						...lane.pendingPermission,
-						title: rewriteShadowPathsInText(
-							lane.pendingPermission.title,
-							this.activityShadowCwd(lane.sessionId) ?? '',
-						),
-						detail: lane.pendingPermission.detail
-							? rewriteShadowPathsInText(
-									lane.pendingPermission.detail,
-									this.activityShadowCwd(lane.sessionId) ?? '',
-								)
-							: lane.pendingPermission.detail,
-					}
-				: undefined,
+			pendingPermission: lane.pendingPermission,
 			changes: this.toChangeCards(lane.changes),
 			workspaceHint: workspaceCtx.linuxCwd ? undefined : (workspaceCtx.error ?? NO_WORKSPACE_FOLDER_HINT),
 			slashCommands: DEFAULT_SLASH_COMMANDS,
@@ -729,7 +699,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
 	private resumeOptions(providerId: string): ResumeOption[] {
 		const lane = this.ensureLane(providerId);
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		const fromDisk = main ? readResumeIndex(main).byProvider[providerId]?.sessions ?? [] : [];
 		const byId = new Map(lane.resumes.map((s) => [s.sessionId, s]));
 		const options: ResumeOption[] = fromDisk
@@ -759,7 +729,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	private writeResumeIndexForLane(providerId: string, lane: ProviderUiLane): void {
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		if (!main) {
 			return;
 		}
@@ -851,7 +821,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		const v2raw = this.context.workspaceState.get(SESSION_STATE_KEY);
 		const v1raw = this.context.workspaceState.get(SESSION_STATE_KEY_V1);
 		const store = migrateToWorkspaceSessions(v2raw ?? v1raw, this.selectedProviderId);
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		const resumeIndex = main ? readResumeIndex(main) : undefined;
 
 		if (!store && !resumeIndex) {
@@ -939,7 +909,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 					providerId,
 					providerSessionId: lane.providerSessionId,
 					modelId: lane.modelId,
-					workspaceCwd: this.mainCwd(),
+					workspaceCwd: this.mainLinuxCwd(),
 				}),
 			);
 		}
@@ -997,9 +967,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	/** Drop shadow + .WSLDeck session UI for resumes that fell out of the retention window. */
+	/** Drop .WSLDeck session UI for resumes that fell out of the retention window. */
 	private async pruneOrphanSessionArtifacts(): Promise<void> {
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		if (!main) {
 			return;
 		}
@@ -1010,12 +980,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				keep.add(s.sessionId);
 			}
 		}
-		await this.shadows.disposeExcept(keep);
-		const onDisk = new Set([...listSessionDeckIds(main), ...listShadowSessionIds(main)]);
+		this.baselines.disposeExcept(keep);
+		const onDisk = new Set(listSessionDeckIds(main));
 		for (const id of onDisk) {
 			if (!keep.has(id)) {
 				deleteSessionDeck(main, id);
-				await this.shadows.disposeSession(main, id);
+				this.baselines.disposeSession(id);
 			}
 		}
 	}
@@ -1024,7 +994,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		if (providerId === this.selectedProviderId) {
 			return;
 		}
-		// Fast path: do not create shadows / ACP sessions on agent switch.
+		// Fast path: do not create baselines / ACP sessions on agent switch.
 		this.schedulePersist({ prune: false });
 		this.selectedProviderId = providerId;
 		const lane = this.ensureLane(providerId);
@@ -1055,11 +1025,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		const session = await this.sessions.startNewSession(providerId, {
 			sessionId: newSessionId,
 			modelId: lane.modelId,
-			workspaceCwd: this.mainCwd(),
+			workspaceCwd: this.mainLinuxCwd(),
 		});
 		lane.providerSessionId = session.providerSessionId;
-		const shadowCwd = await this.ensureShadowCwd(lane.sessionId);
-		session.workspaceCwd = shadowCwd ?? this.mainCwd();
+		await this.ensureSessionBaseline(lane.sessionId, { recapture: true });
 		lane.messages = [];
 		lane.activities = [];
 		lane.pendingPermission = undefined;
@@ -1090,7 +1059,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		this.archiveActiveIfNeeded(providerId);
 
 		this.persistLaneDeck(lane);
-		// Keep previous session shadow — Resume must remain Keep-capable.
 
 		lane.sessionId = target.sessionId;
 		lane.providerSessionId = target.providerSessionId;
@@ -1103,7 +1071,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		lane.status = 'idle';
 		lane.restoredFromPersist = lane.messages.length > 0;
 
-		const shadowCwd = await this.ensureShadowCwd(lane.sessionId);
+		await this.ensureSessionBaseline(lane.sessionId);
 		await this.sessions.replaceSession(
 			providerId,
 			createAgentSession({
@@ -1111,12 +1079,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				providerId,
 				providerSessionId: lane.providerSessionId,
 				modelId: lane.modelId,
-				workspaceCwd: shadowCwd ?? this.mainCwd(),
+				workspaceCwd: this.mainLinuxCwd(),
 			}),
 		);
 		await this.restoreLaneDeck(lane);
 
-		const main = this.mainCwd();
+		const main = this.mainFsPath();
 		if (main) {
 			setResumeIndexActive(main, providerId, lane.sessionId);
 			const entry = readResumeIndex(main).byProvider[providerId]?.sessions.find(
@@ -1211,16 +1179,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
 	private async handleAcceptChange(changeId: string): Promise<void> {
 		const lane = this.lane();
-		const shadow = this.shadows.get(lane.sessionId);
+		const baseline = this.baselines.get(lane.sessionId);
 		const change = lane.changes.find((c) => c.id === changeId);
-		if (!shadow || !change) {
+		if (!baseline || !change) {
 			this.post({ type: 'toast', message: 'Change not found.' });
 			return;
 		}
 		if (change.state !== 'pending' && change.state !== 'conflicted') {
 			return;
 		}
-		const updated = await acceptChange(shadow, change);
+		const updated = await acceptChange(baseline, change);
 		lane.changes = lane.changes.map((c) => (c.id === changeId ? updated : c));
 		if (updated.state === 'conflicted') {
 			this.post({
@@ -1234,24 +1202,24 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
 	private async handleRejectChange(changeId: string): Promise<void> {
 		const lane = this.lane();
-		const shadow = this.shadows.get(lane.sessionId);
+		const baseline = this.baselines.get(lane.sessionId);
 		const change = lane.changes.find((c) => c.id === changeId);
-		if (!shadow || !change) {
+		if (!baseline || !change) {
 			this.post({ type: 'toast', message: 'Change not found.' });
 			return;
 		}
-		await cancelChange(shadow, change);
+		await cancelChange(baseline, change);
 		await this.refreshChanges(lane);
 		this.pushState();
 	}
 
 	private async handleAcceptAll(): Promise<void> {
 		const lane = this.lane();
-		const shadow = this.shadows.get(lane.sessionId);
-		if (!shadow) {
+		const baseline = this.baselines.get(lane.sessionId);
+		if (!baseline) {
 			return;
 		}
-		lane.changes = await acceptAll(shadow, lane.changes);
+		lane.changes = await acceptAll(baseline, lane.changes);
 		const conflicts = lane.changes.filter((c) => c.state === 'conflicted').length;
 		if (conflicts > 0) {
 			this.post({ type: 'toast', message: `${conflicts} file(s) conflicted in Main.` });
@@ -1262,48 +1230,48 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
 	private async handleRejectAll(): Promise<void> {
 		const lane = this.lane();
-		const shadow = this.shadows.get(lane.sessionId);
-		if (!shadow) {
+		const baseline = this.baselines.get(lane.sessionId);
+		if (!baseline) {
 			return;
 		}
-		await cancelAll(shadow, lane.changes);
+		await cancelAll(baseline, lane.changes);
 		await this.refreshChanges(lane);
 		this.pushState();
 	}
 
 	private async handleViewDiff(changeId: string): Promise<void> {
 		const lane = this.lane();
-		const shadow = this.shadows.get(lane.sessionId);
+		const baseline = this.baselines.get(lane.sessionId);
 		const change = lane.changes.find((c) => c.id === changeId);
-		if (!shadow || !change) {
+		if (!baseline || !change) {
 			this.post({ type: 'toast', message: 'Change not found.' });
 			return;
 		}
-		await viewDiff(shadow, change);
+		await viewDiff(baseline, change);
 	}
 
 	private async handleViewRevisionDiff(changeId: string, revisionId: string): Promise<void> {
 		const lane = this.lane();
-		const main = this.mainCwd();
-		const shadow = this.shadows.get(lane.sessionId);
+		const main = this.mainFsPath();
+		const baseline = this.baselines.get(lane.sessionId);
 		const change = lane.changes.find((c) => c.id === changeId);
 		const revision = change?.revisions.find((r) => r.id === revisionId);
-		if (!main || !shadow || !change || !revision) {
+		if (!main || !baseline || !change || !revision) {
 			this.post({ type: 'toast', message: 'Revision not found.' });
 			return;
 		}
-		await viewRevisionDiff(shadow, change, revision, main, lane.sessionId);
+		await viewRevisionDiff(baseline, change, revision, main, lane.sessionId);
 	}
 
 	private async handleCompareMain(changeId: string): Promise<void> {
 		const lane = this.lane();
-		const shadow = this.shadows.get(lane.sessionId);
+		const baseline = this.baselines.get(lane.sessionId);
 		const change = lane.changes.find((c) => c.id === changeId);
-		if (!shadow || !change) {
+		if (!baseline || !change) {
 			this.post({ type: 'toast', message: 'Change not found.' });
 			return;
 		}
-		await compareMain(shadow, change);
+		await compareMain(baseline, change);
 	}
 
 	private async applyModelSelection(modelId: string): Promise<void> {
@@ -1322,7 +1290,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 			return;
 		}
 		lane.modelId = match.id;
-		const session = this.sessions.getSession(this.selectedProviderId);
+		let session = this.sessions.getSession(this.selectedProviderId);
 		if (session) {
 			session.modelId = match.id;
 		}
@@ -1333,7 +1301,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 			match.id !== 'auto-smart'
 		) {
 			try {
-				await this.ensureProviderSession('cursor', lane);
+				session = await this.ensureProviderSession('cursor', lane);
 				const provider = this.sessions.getProvider('cursor') as CursorProvider | undefined;
 				if (provider && session && typeof provider.applyModelSelection === 'function') {
 					await provider.applyModelSelection(session.id, match.id);
@@ -1424,13 +1392,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				streaming.text = '（已取消）';
 			}
 		}
+		this.pushState();
 		try {
 			await this.sessions.cancel(providerId);
 		} catch {
 			// still flip UI to idle
 		}
-		await this.refreshChanges(lane);
-		this.persistLaneDeck(lane);
+		void this.refreshChanges(lane).then(() => {
+			this.persistLaneDeck(lane);
+			this.pushState();
+		});
 		this.flashStatus('Cancelled');
 	}
 
@@ -1577,22 +1548,21 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 				if (!stillThisRun()) {
 					break;
 				}
-				if (this.selectedProviderId !== providerId) {
-					continue;
-				}
-				this.applyEvent(lane, event, agentMsgId);
+				this.applyEvent(providerId, lane, event, agentMsgId);
 				if (event.type === 'tool.completed' && shouldRefreshChangesForTool(event.tool)) {
 					void this.refreshChanges(lane, {
 						turnId: event.turnId,
 						agentMsgId,
 					}).then(() => {
-						if (stillThisRun()) {
+						if (stillThisRun() && this.selectedProviderId === providerId) {
 							this.pushState();
 						}
 					});
 				}
-				this.post({ type: 'agentEvent', event });
-				this.pushState();
+				if (this.selectedProviderId === providerId) {
+					this.post({ type: 'agentEvent', event });
+					this.pushState();
+				}
 				if (event.type === 'session.failed') {
 					promptFailed = true;
 					break;
@@ -1611,8 +1581,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 			await this.refreshChanges(lane, { agentMsgId, turnId: lane.activeTurnId });
 			if (promptFailed) {
 				lane.status = 'error';
-				this.statusDetail = lane.error;
-				this.pushState();
+				if (this.selectedProviderId === providerId) {
+					this.statusDetail = lane.error;
+					this.pushState();
+				}
 				this.persistLaneDeck(lane);
 				return;
 			}
@@ -1656,7 +1628,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	private applyEvent(lane: ProviderUiLane, event: AgentEvent, agentMsgId: string): void {
+	private applyEvent(
+		providerId: string,
+		lane: ProviderUiLane,
+		event: AgentEvent,
+		agentMsgId: string,
+	): void {
 		if ('turnId' in event && event.turnId) {
 			lane.activeTurnId = event.turnId;
 			const msg = lane.messages.find((m) => m.id === agentMsgId);
@@ -1737,7 +1714,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 						? { ...a, status: 'failed', outcome: event.message }
 						: a,
 				);
-				const session = this.sessions.getSession(this.selectedProviderId);
+				const session = this.sessions.getSession(providerId);
 				if (session && !session.providerSessionId) {
 					lane.providerSessionId = undefined;
 				} else if (
@@ -1761,7 +1738,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 					})),
 				};
 				lane.status = 'waiting';
-				this.statusDetail = event.message;
+				if (this.selectedProviderId === providerId) {
+					this.statusDetail = event.message;
+				}
 				this.persistLaneDeck(lane);
 				return;
 			}

@@ -16,6 +16,7 @@ interface ProviderSlot {
 export class AgentSessionManager {
 	private readonly providers = new Map<string, AgentProvider>();
 	private readonly slots = new Map<string, ProviderSlot>();
+	private readonly ensureInFlight = new Map<string, Promise<AgentSession>>();
 	private focusedProviderId?: string;
 
 	register(provider: AgentProvider): void {
@@ -63,6 +64,32 @@ export class AgentSessionManager {
 			resumeProviderSessionId?: string;
 		},
 	): Promise<AgentSession> {
+		const inFlight = this.ensureInFlight.get(providerId);
+		if (inFlight) {
+			await inFlight;
+			return this.ensureSession(providerId, options);
+		}
+		const operation = this.ensureSessionOnce(providerId, options);
+		this.ensureInFlight.set(providerId, operation);
+		try {
+			return await operation;
+		} finally {
+			if (this.ensureInFlight.get(providerId) === operation) {
+				this.ensureInFlight.delete(providerId);
+			}
+		}
+	}
+
+	private async ensureSessionOnce(
+		providerId: string,
+		options?: {
+			sessionId?: string;
+			modelId?: string;
+			workspaceCwd?: string;
+			acpSpawnCwd?: string;
+			resumeProviderSessionId?: string;
+		},
+	): Promise<AgentSession> {
 		const provider = this.providers.get(providerId);
 		if (!provider) {
 			throw new Error(`Unknown agent provider: ${providerId}`);
@@ -89,7 +116,9 @@ export class AgentSessionManager {
 		}
 
 		if (existing) {
-			await this.disposeProvider(providerId);
+			this.slots.delete(providerId);
+			existing.abort?.abort();
+			await existing.provider.dispose(existing.session);
 		}
 
 		const session = await provider.createSession({
@@ -150,6 +179,9 @@ export class AgentSessionManager {
 		if (!slot) {
 			throw new Error(`No session for provider: ${providerId}`);
 		}
+		if (slot.abort && !slot.abort.signal.aborted) {
+			throw new Error(`Agent provider ${providerId} is already running`);
+		}
 
 		const controller = new AbortController();
 		slot.abort = controller;
@@ -199,6 +231,14 @@ export class AgentSessionManager {
 	}
 
 	async disposeProvider(providerId: string): Promise<void> {
+		const inFlight = this.ensureInFlight.get(providerId);
+		if (inFlight) {
+			try {
+				await inFlight;
+			} catch {
+				// A failed create has no live slot to dispose.
+			}
+		}
 		const slot = this.slots.get(providerId);
 		if (!slot) {
 			return;

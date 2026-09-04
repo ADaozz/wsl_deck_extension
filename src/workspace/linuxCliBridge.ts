@@ -55,16 +55,38 @@ function assertLinuxCwd(ctx: LinuxCliContext): string {
 	return cwd;
 }
 
-function compactEnv(env?: Record<string, string | undefined>): string[] {
-	if (!env) {
-		return [];
-	}
+function compactEnv(
+	env?: Record<string, string | undefined>,
+	unsetEnvKeys?: string[],
+): string[] {
 	const out: string[] = [];
+	for (const key of unsetEnvKeys ?? []) {
+		if (key.trim()) {
+			out.push('-u', key);
+		}
+	}
+	if (!env) {
+		return out;
+	}
 	for (const [key, value] of Object.entries(env)) {
 		if (value === undefined || value === '') {
 			continue;
 		}
 		out.push(`${key}=${value}`);
+	}
+	return out;
+}
+
+function applyUnsetEnvKeys(
+	env: Record<string, string | undefined>,
+	unsetEnvKeys?: string[],
+): Record<string, string | undefined> {
+	if (!unsetEnvKeys?.length) {
+		return env;
+	}
+	const out = { ...env };
+	for (const key of unsetEnvKeys) {
+		delete out[key];
 	}
 	return out;
 }
@@ -95,6 +117,7 @@ export function buildLinuxCliLaunch(
 	ctx: LinuxCliContext,
 	argv: string[],
 	env?: Record<string, string | undefined>,
+	unsetEnvKeys?: string[],
 ): CliLaunchSpec {
 	if (argv.length === 0 || !argv[0]) {
 		throw new LinuxCliBridgeError('Empty argv for Linux CLI launch');
@@ -104,7 +127,7 @@ export function buildLinuxCliLaunch(
 		const linuxCwd = assertLinuxCwd(ctx);
 		const wslArgs = [...buildWslExeArgs(linuxCwd, ctx.distro)];
 		const inner: string[] = [];
-		const envArgs = compactEnv(env);
+		const envArgs = compactEnv(env, unsetEnvKeys);
 		if (envArgs.length > 0) {
 			inner.push('env', ...envArgs);
 		}
@@ -208,6 +231,7 @@ export interface RunLinuxCliOptions {
 	maxBuffer?: number;
 	linuxEnv?: Record<string, string | undefined>;
 	env?: Record<string, string | undefined>;
+	unsetEnvKeys?: string[];
 }
 
 export async function runLinuxCli(
@@ -216,15 +240,18 @@ export async function runLinuxCli(
 	opts?: RunLinuxCliOptions,
 ): Promise<{ stdout: string; stderr: string }> {
 	const launchEnv = mergeCliLaunchEnv(opts?.linuxEnv, opts?.env);
-	const launch = buildLinuxCliLaunch(ctx, argv, launchEnv);
+	const launch = buildLinuxCliLaunch(ctx, argv, launchEnv, opts?.unsetEnvKeys);
 	const spawnOpts: Parameters<typeof execFileAsync>[2] = {
 		timeout: opts?.timeout ?? 30_000,
 		maxBuffer: opts?.maxBuffer ?? 8 * 1024 * 1024,
 		windowsHide: true,
 	};
 	if (!usesWslCliBridge(ctx)) {
-		if (launchEnv) {
-			spawnOpts.env = { ...process.env, ...launchEnv };
+		if (launchEnv || opts?.unsetEnvKeys?.length) {
+			spawnOpts.env = applyUnsetEnvKeys(
+				{ ...process.env, ...launchEnv },
+				opts?.unsetEnvKeys,
+			);
 		}
 		if (ctx.linuxCwd) {
 			spawnOpts.cwd = ctx.linuxCwd;
@@ -238,6 +265,7 @@ export interface SpawnLinuxCliOptions {
 	signal?: AbortSignal;
 	linuxEnv?: Record<string, string | undefined>;
 	env?: Record<string, string | undefined>;
+	unsetEnvKeys?: string[];
 }
 
 /** Terminate a CLI child (wsl.exe tree on Windows). Idempotent. */
@@ -282,15 +310,20 @@ export function spawnLinuxCli(
 	opts?: SpawnLinuxCliOptions,
 ): ChildProcess {
 	const launchEnv = mergeCliLaunchEnv(opts?.linuxEnv, opts?.env);
-	const launch = buildLinuxCliLaunch(ctx, argv, launchEnv);
+	const launch = buildLinuxCliLaunch(ctx, argv, launchEnv, opts?.unsetEnvKeys);
 	const spawnOpts: SpawnOptions = {
 		stdio: ['pipe', 'pipe', 'pipe'],
 		windowsHide: true,
 	};
 	if (usesWslCliBridge(ctx)) {
-		spawnOpts.env = process.env;
+		// Force wsl.exe diagnostics to UTF-8; otherwise localized Windows warnings
+		// may arrive as UTF-16LE and be corrupted before readline can sanitize them.
+		spawnOpts.env = { ...process.env, WSL_UTF8: '1' };
 	} else {
-		spawnOpts.env = launchEnv ? { ...process.env, ...launchEnv } : { ...process.env };
+		spawnOpts.env = applyUnsetEnvKeys(
+			launchEnv ? { ...process.env, ...launchEnv } : { ...process.env },
+			opts?.unsetEnvKeys,
+		);
 		if (ctx.linuxCwd) {
 			spawnOpts.cwd = ctx.linuxCwd;
 		}

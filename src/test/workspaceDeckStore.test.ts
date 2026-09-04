@@ -26,7 +26,6 @@ suite('workspace .WSLDeck store', () => {
 				path: 'src/a.ts',
 				additions: 2,
 				deletions: 1,
-				shadowPath: '/shadow/src/a.ts',
 				mainPath: '/main/src/a.ts',
 				createdAt: 1_000,
 				updatedAt: 2_000,
@@ -61,9 +60,8 @@ suite('workspace .WSLDeck store', () => {
 			assert.strictEqual(loaded!.changes[0].revisions![0].turnId, 'turn-1');
 			assert.strictEqual(loaded!.pendingPermission?.requestId, 'perm-1');
 
-			const materialized = materializeChanges(loaded!.changes, '/main', '/shadow');
+			const materialized = materializeChanges(loaded!.changes, '/main');
 			assert.strictEqual(materialized[0].mainPath, path.join('/main', 'src/a.ts'));
-			assert.strictEqual(materialized[0].shadowPath, path.join('/shadow', 'src/a.ts'));
 			assert.strictEqual(materialized[0].revisions.length, 1);
 			assert.strictEqual(materialized[0].createdAt, 1_000);
 

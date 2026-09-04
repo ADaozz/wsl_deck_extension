@@ -69,7 +69,22 @@ type SessionHandle = AgentSession & {
 	lastConfigOptions?: unknown;
 	lastModesField?: unknown;
 	lastModelsPayload?: unknown;
+	acpStartPromise?: Promise<CursorAcpClient>;
+	cancelPromise?: Promise<void>;
 };
+
+export function cursorLoginMethod(initializeResult: unknown): string | undefined {
+	if (!initializeResult || typeof initializeResult !== 'object') {
+		return undefined;
+	}
+	const methods = (initializeResult as { authMethods?: Array<{ id?: unknown }> }).authMethods;
+	if (!Array.isArray(methods)) {
+		return undefined;
+	}
+	return methods.some((method) => method?.id === 'cursor_login')
+		? 'cursor_login'
+		: undefined;
+}
 
 export class CursorProvider implements AgentProvider {
 	readonly id = 'cursor';
@@ -328,18 +343,17 @@ export class CursorProvider implements AgentProvider {
 		return toWslLinuxPath(raw, host) ?? raw;
 	}
 
-	private async acpLinuxEnv(cliCtx: LinuxCliContext): Promise<LinuxAgentEnv> {
-		const configured = this.getSetting('cursor.apiKey', '').trim();
-		const overrides: Record<string, string | undefined> = {};
-		if (configured) {
-			overrides.CURSOR_API_KEY = configured;
-		} else {
-			const key = await this.resolveApiKey(cliCtx);
-			if (key) {
-				overrides.CURSOR_API_KEY = key;
-			}
-		}
-		return this.resolveAgentEnv(cliCtx, overrides);
+	private async acpLinuxEnv(
+		cliCtx: LinuxCliContext,
+	): Promise<{ env: LinuxAgentEnv; unsetEnvKeys: string[] }> {
+		// ACP reuses `agent login`; never let an API key override the CLI credential store.
+		return {
+			env: await this.resolveAgentEnv(cliCtx, {
+				CURSOR_API_KEY: undefined,
+				NO_OPEN_BROWSER: '1',
+			}),
+			unsetEnvKeys: ['CURSOR_API_KEY'],
+		};
 	}
 
 	private async stopAcp(handle: SessionHandle): Promise<void> {
@@ -353,12 +367,33 @@ export class CursorProvider implements AgentProvider {
 	}
 
 	private async ensureAcp(session: SessionHandle): Promise<CursorAcpClient> {
-		if (session.acp && session.acpReady) {
+		if (session.acp && session.acpReady && session.acp.isRunning()) {
 			return session.acp;
+		}
+		if (session.acpStartPromise) {
+			return session.acpStartPromise;
+		}
+		const startPromise = this.startAcp(session);
+		session.acpStartPromise = startPromise;
+		try {
+			return await startPromise;
+		} catch (err) {
+			await this.stopAcp(session);
+			throw err;
+		} finally {
+			if (session.acpStartPromise === startPromise) {
+				session.acpStartPromise = undefined;
+			}
+		}
+	}
+
+	private async startAcp(session: SessionHandle): Promise<CursorAcpClient> {
+		if (session.acp) {
+			await this.stopAcp(session);
 		}
 		const exe = this.executable();
 		const cliCtx = this.cliContext(session);
-		const linuxEnv = await this.acpLinuxEnv(cliCtx);
+		const { env: linuxEnv, unsetEnvKeys } = await this.acpLinuxEnv(cliCtx);
 		const argv = await resolveLinuxArgv(cliCtx, exe, ['acp'], linuxEnv);
 		if (!argv) {
 			throw new Error(`Cursor CLI not found ("${exe}")`);
@@ -370,13 +405,14 @@ export class CursorProvider implements AgentProvider {
 			cliCtx,
 			argv,
 			linuxEnv,
+			unsetEnvKeys,
 		});
 		this.log?.line('cursor', '--', `${formatLinuxCliDetail(argv[0], cliCtx)} acp`);
 		if (sessionCwd) {
 			this.log?.line('cursor', '--', `session cwd=${sessionCwd}`);
 		}
 
-		await client.request('initialize', {
+		const initialized = await client.request('initialize', {
 			protocolVersion: 1,
 			clientCapabilities: {
 				fs: { readTextFile: false, writeTextFile: false },
@@ -384,6 +420,11 @@ export class CursorProvider implements AgentProvider {
 			},
 			clientInfo: { name: 'wsldeck-extension', version: '0.0.1' },
 		});
+		const loginMethod = cursorLoginMethod(initialized);
+		if (loginMethod) {
+			await client.request('authenticate', { methodId: loginMethod }, 60_000);
+			this.log?.line('cursor', '--', 'authenticated with agent login credentials');
+		}
 
 		if (session.providerSessionId) {
 			try {
@@ -433,6 +474,30 @@ export class CursorProvider implements AgentProvider {
 
 		session.acpReady = true;
 		return client;
+	}
+
+	private requestCancel(handle: SessionHandle): Promise<void> {
+		if (handle.cancelPromise) {
+			return handle.cancelPromise;
+		}
+		if (!handle.acp || !handle.providerSessionId || !handle.acp.isRunning()) {
+			return Promise.resolve();
+		}
+		const cancelPromise = handle.acp
+			.request(
+				'session/cancel',
+				{ sessionId: handle.providerSessionId },
+				10_000,
+			)
+			.then(() => undefined)
+			.catch(() => undefined)
+			.finally(() => {
+				if (handle.cancelPromise === cancelPromise) {
+					handle.cancelPromise = undefined;
+				}
+			});
+		handle.cancelPromise = cancelPromise;
+		return cancelPromise;
 	}
 
 	/** Open ACP early so model/reasoning catalogs are available before the first prompt. */
@@ -753,7 +818,7 @@ export class CursorProvider implements AgentProvider {
 
 		const onAbort = () => {
 			this.rejectPendingPermissions(session.id, 'Aborted');
-			void client.request('session/cancel', { sessionId: handle.providerSessionId });
+			void this.requestCancel(handle);
 			promptDone = true;
 			wake?.();
 		};
@@ -859,15 +924,8 @@ export class CursorProvider implements AgentProvider {
 	async cancel(session: AgentSession): Promise<void> {
 		const handle = this.handles.get(session.id) as SessionHandle | undefined;
 		this.rejectPendingPermissions(session.id, 'Cancelled');
-		if (handle?.acp && handle.providerSessionId) {
-			try {
-				await handle.acp.request('session/cancel', { sessionId: handle.providerSessionId });
-			} catch {
-				// ignore
-			}
-		}
 		if (handle) {
-			await this.stopAcp(handle);
+			await this.requestCancel(handle);
 		}
 		session.status = 'STOPPED';
 	}

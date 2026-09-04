@@ -15,7 +15,7 @@ export interface AgentSession {
 	modelId?: string;
 	/** Linux / local cwd for the agent process */
 	workspaceCwd?: string;
-	/** Cwd for spawning CLI/ACP child processes (usually workspace root, not shadow). */
+	/** Cwd for spawning CLI/ACP child processes (workspace root). */
 	acpSpawnCwd?: string;
 	status: AgentSessionStatus;
 	createdAt: number;

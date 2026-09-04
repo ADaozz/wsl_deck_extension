@@ -96,7 +96,7 @@ export function codexItemActivityGroup(
 	return 'tools';
 }
 
-/** Non-shell Codex items may change workspace files — confirmed on disk via shadow diff. */
+/** Non-shell Codex items may change workspace files — confirmed on disk via Main vs baseline diff. */
 export function codexItemMutatesWorkspace(
 	item: NonNullable<CodexJsonLine['item']>,
 ): boolean {

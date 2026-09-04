@@ -1,8 +1,8 @@
 {
   "name": "wsldeck-extension",
   "displayName": "WSLDeck",
-  "description": "Unified WSL AI Agent workflow for VS Code — Codex, Cursor, Shadow Workspace, Proposed Changes",
-  "version": "0.1.3",
+  "description": "Unified WSL AI Agent workflow for VS Code — Codex, Cursor, Session Baseline, Proposed Changes",
+  "version": "0.2.0",
   "publisher": "wsldeck",
   "license": "MIT",
   "repository": {
@@ -161,11 +161,6 @@
           "type": "string",
           "default": "",
           "description": "Preferred WSL distribution (empty = default)"
-        },
-        "wsldeck.shadow.root": {
-          "type": "string",
-          "default": "",
-          "description": "Shadow workspace root (empty = ~/.local/share/wsldeck-extension; keep outside the opened folder)"
         }
       }
     }

@@ -22,7 +22,7 @@
 |--------|------|
 | 1 | **Linux-native Agent Execution** — Codex/Cursor 在 WSL/Linux 执行 |
 | 2 | **IDE-native Agent Experience** — 对话、Activity、终端、Diff 留在 VS Code |
-| 3 | **Controlled Agent Changes** — Diff、Keep/Cancel；Shadow 为 v0.1.0 默认隔离实现 |
+| 3 | **Controlled Agent Changes** — Diff、Keep/Cancel；会话 baseline + Main 直改 |
 
 ### 分层架构
 
@@ -45,7 +45,7 @@
       Linux Workspace
              │
       Change Safety Layer
-       ├── Shadow（当前默认）
+       ├── Session Baseline
        ├── Change Tracking / Diff Review
        └── Keep / Cancel
              │
@@ -196,7 +196,7 @@ codex
 ```text
 Main Workspace
       │
-      └── create shadow
+      └── capture session baseline
                ↓
         Agent Workspace
                ↓
@@ -212,7 +212,7 @@ Accept
 才允许：
 
 ```text
-Shadow → Main Workspace
+Agent → Main Workspace（直接编辑）
 ```
 
 ---
@@ -257,7 +257,7 @@ CodexGitManager
 AgentSessionManager
 AgentProvider
 ChangeTracker
-ShadowWorkspaceManager
+SessionBaselineManager
 ```
 
 然后：
@@ -322,10 +322,10 @@ WSLDeckExtension/
 │   │   ├── patchService.ts
 │   │   └── changeCoordinator.ts
 │   │
-│   ├── shadow/
-│   │   ├── shadowWorkspace.ts
-│   │   ├── shadowWorkspaceManager.ts
-│   │   └── gitWorktreeBackend.ts
+│   ├── session/
+│   │   ├── sessionBaseline.ts
+│   │   ├── sessionGit.ts
+│   │   └── workspaceCopy.ts
 │   │
 │   ├── git/
 │   │   ├── gitRunner.ts
@@ -747,6 +747,19 @@ session/request_permission
 session/cancel
 ```
 
+WSLDeck 要求用户先运行 `agent login`，ACP 进程复用 CLI 登录态。若 `initialize` 返回
+`cursor_login`，客户端调用 `authenticate(cursor_login)` 让 ACP 加载已有凭据，实际启动顺序为
+`initialize → authenticate → session/new|load`。启动 ACP 时同时清除 `CURSOR_API_KEY`，避免它
+覆盖 CLI 凭据（API key 只用于 SDK 模型目录），并设置 `NO_OPEN_BROWSER=1` 防止 ACP 自动
+拉起登录网页；登录失效时由用户在终端手动运行 `agent login`。
+
+`NO_OPEN_BROWSER=1` 只禁止自动弹窗，**不会创建登录态**。排障以目标发行版、目标用户下的
+`agent status` 为准；`Not logged in` 时先手动执行 `agent login`，再重载 Extension Host。
+
+实现必须保持以下生命周期不变量：同一 session 的 ACP 初始化只允许一个 in-flight Promise；
+进程退出后不得继续报告 ready；dispose 必须 reject 所有 pending RPC；abort 与显式 Cancel 必须
+合并为同一个 `session/cancel` 请求。
+
 因此它非常适合 WSLDeckExtension。([Cursor][7])
 
 ### 验收
@@ -769,49 +782,25 @@ Agent
 
 ---
 
-# 11. Milestone 6 — Shadow Workspace
+# 11. Milestone 6 — Session Baseline
 
 这是项目最关键阶段。
 
 实现：
 
 ```text
-ShadowWorkspaceManager
+SessionBaselineManager
 ```
 
-第一版强烈建议 Git 项目使用：
+Git 仓库：会话开始时**快照当前工作区**到 `.WSLDeck/sessions/<id>/baseline/`（并记录 HEAD 元数据）。Diff 卡片对比 **Main vs 会话起点快照**，与 `git status` / commit 无关；Agent **不会**自动 commit。
 
-```text
-git worktree
-```
-
-但工作目录由 **WSLDeckExtension** 管，而不是 Codex/Cursor 管。
-
-例如：
-
-```text
-Project
-
-/home/neo/projects/demo
-```
-
-创建：
-
-```text
-~/.local/share/wsldeck-extension/
-└── workspaces/
-    └── <repo-id>/
-        └── <session-id>/
-```
+非 Git：一次性 snapshot 到 `.WSLDeck/sessions/<id>/baseline/`。
 
 Agent：
 
 ```text
-cwd =
-~/.local/share/wsldeck-extension/workspaces/.../
+cwd = Main Workspace（linuxCwd / workspaceFsPath）
 ```
-
-而不是 Main Workspace。
 
 ### 验收核心
 
@@ -822,19 +811,7 @@ A.java
 B.java
 ```
 
-此时 Main：
-
-```bash
-git status
-```
-
-必须：
-
-```text
-没有出现 Agent 修改
-```
-
-这是硬门槛。
+Main 文件直接变化；Diff 卡片对比 Main vs session baseline。**Cancel** 恢复 session 开始时内容；**Keep** 确认/收起卡片。
 
 ---
 
@@ -871,11 +848,11 @@ interface ProposedChange {
 检测来源：
 
 ```text
-Shadow baseline
+Session baseline
       ↓
-git diff
+git diff / snapshot compare
       ↓
-Current Shadow
+Current Main
 ```
 
 统计：
@@ -932,7 +909,7 @@ Agent response
 
 ```text
 LEFT
-Shadow baseline
+Session baseline
 
 RIGHT
 Agent result
@@ -967,7 +944,7 @@ Pending Change
       ↓
 Cancel
       ↓
-恢复 Shadow 中该文件 baseline
+从 baseline 恢复 Main 中该文件
       ↓
 Main Workspace 不变化
 ```
@@ -1122,7 +1099,7 @@ Session
 ├─ provider
 ├─ providerSessionId
 ├─ workspace
-├─ shadowWorkspace
+├─ sessionBaseline
 ├─ turns[]
 └─ status
 ```
@@ -1151,7 +1128,7 @@ Cursor Session 3
 
 > **一个 Workspace 同时只允许一个可写 Agent Session。**
 
-避免两个 Shadow 同时 Accept 同一文件导致复杂冲突。
+避免两个会话同时 Keep 同一文件导致复杂冲突。
 
 后面再开放并发。
 
@@ -1177,7 +1154,6 @@ wsldeck.agent.defaultProvider
 wsldeck.codex.executable
 wsldeck.cursor.executable
 wsldeck.wsl.distribution
-wsldeck.shadow.root
 ```
 
 不要把：
@@ -1258,7 +1234,7 @@ patch validation
 ```text
 baseline
 ↓
-shadow worktree
+session baseline
 ↓
 修改文件
 ↓
@@ -1317,7 +1293,7 @@ Cursor 再重复一次。
 | M2  | Agent Webview UI          |  P0 |
 | M3  | AgentProvider abstraction |  P0 |
 | M4  | Codex Provider            |  P0 |
-| M5  | Shadow Workspace          |  P0 |
+| M5  | Session Baseline          |  P0 |
 | M6  | Change Detection + Card   |  P0 |
 | M7  | Diff Viewer               |  P0 |
 | M8  | Accept / Cancel           |  P0 |
@@ -1348,7 +1324,7 @@ Codex ≠ 核心
 ✓ Cursor CLI
 ✓ Provider selector
 ✓ 对话
-✓ Shadow Workspace
+✓ Session Baseline
 ✓ 文件级 Change Card
 ✓ -XX / +XXX
 ✓ 原生 Diff
@@ -1531,7 +1507,7 @@ M3 Provider
       ↓
 M4 Codex
       ↓
-M5 Shadow Workspace
+M5 Session Baseline
       ↓
 M6 Proposed Changes
       ↓
@@ -1544,7 +1520,7 @@ M9 Cursor ACP
 M10 Polish
 ```
 
-其中最不能妥协的是 **Shadow Workspace、Provider Independence、Native Git Ownership** 三个边界。它们决定后续加 Cursor、其他 CLI、多人仓库、Push/Pull 时是否会推翻前面的实现。
+其中最不能妥协的是 **Session Baseline、Provider Independence、Native Git Ownership** 三个边界。它们决定后续加 Cursor、其他 CLI、多人仓库、Push/Pull 时是否会推翻前面的实现。
 
 [1]: https://code.visualstudio.com/api/extension-guides/scm-provider?utm_source=chatgpt.com "Source Control API | Visual Studio Code Extension API"
 [2]: https://code.visualstudio.com/api/extension-guides/webview?utm_source=chatgpt.com "Webview API | Visual Studio Code Extension API"
@@ -1554,4 +1530,3 @@ M10 Polish
 [6]: https://prod.cursor.com/docs/cli/overview?utm_source=chatgpt.com "Cursor CLI | Cursor Docs"
 [7]: https://prod.cursor.com/docs/cli/acp?utm_source=chatgpt.com "ACP | Cursor Docs"
 [8]: https://code.visualstudio.com/api/advanced-topics/extension-host?utm_source=chatgpt.com "Extension Host | Visual Studio Code Extension API"
-

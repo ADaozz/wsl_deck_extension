@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline';
 import type { AgentRawLog } from '../../agentRawLog';
+import { sanitizeAgentLogLine } from '../../agentLogSanitize';
 import { spawnLinuxCli, killLinuxCliChild, type LinuxCliContext } from '../../../workspace/linuxCliBridge';
 
 type Pending = {
@@ -18,7 +19,11 @@ export type AcpStartOptions = {
 	argv: string[];
 	linuxEnv?: Record<string, string | undefined>;
 	env?: Record<string, string | undefined>;
+	unsetEnvKeys?: string[];
 };
+
+/** @deprecated use sanitizeAgentLogLine */
+export const sanitizeAcpLogLine = sanitizeAgentLogLine;
 
 /**
  * Minimal JSON-RPC 2.0 client over agent acp stdio (newline-delimited).
@@ -31,6 +36,10 @@ export class CursorAcpClient {
 
 	constructor(private readonly log?: AgentRawLog) {}
 
+	isRunning(): boolean {
+		return Boolean(this.child && this.child.exitCode === null && this.child.signalCode === null);
+	}
+
 	setNotificationHandler(handler: AcpNotificationHandler): void {
 		this.onNotification = handler;
 	}
@@ -42,6 +51,7 @@ export class CursorAcpClient {
 		const child = spawnLinuxCli(options.cliCtx, options.argv, {
 			linuxEnv: options.linuxEnv,
 			env: options.env,
+			unsetEnvKeys: options.unsetEnvKeys,
 		}) as import('node:child_process').ChildProcessWithoutNullStreams;
 		this.child = child;
 
@@ -52,13 +62,16 @@ export class CursorAcpClient {
 
 		const rl = createInterface({ input: child.stdout });
 		rl.on('line', (line) => {
-			this.log?.line('cursor', '<<', line);
+			this.log?.line('cursor', '<<', sanitizeAgentLogLine(line));
 			this.onLine(line);
 		});
 
 		const errRl = createInterface({ input: child.stderr });
 		errRl.on('line', (line) => {
-			this.log?.line('cursor', '!!', line);
+			const safe = sanitizeAgentLogLine(line);
+			if (safe.replace(/\\x00/g, '').trim()) {
+				this.log?.line('cursor', '!!', safe);
+			}
 		});
 
 		child.on('error', (err) => {
@@ -139,6 +152,10 @@ export class CursorAcpClient {
 	async dispose(): Promise<void> {
 		const child = this.child;
 		this.child = undefined;
+		const err = new Error('Cursor ACP client disposed');
+		for (const pending of [...this.pending.values()]) {
+			pending.reject(err);
+		}
 		this.pending.clear();
 		if (!child) {
 			return;

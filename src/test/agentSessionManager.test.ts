@@ -79,7 +79,7 @@ suite('AgentSessionManager per-provider sessions', () => {
 		assert.strictEqual(manager.getSession('cursor'), undefined);
 	});
 
-	test('ensureSession honors stable sessionId for shadow alignment', async () => {
+	test('ensureSession honors stable sessionId for baseline alignment', async () => {
 		const manager = new AgentSessionManager();
 		manager.register(mockProvider('codex'));
 		const session = await manager.ensureSession('codex', {
@@ -92,5 +92,54 @@ suite('AgentSessionManager per-provider sessions', () => {
 			modelId: 'default',
 		});
 		assert.strictEqual(again.id, 'session-fixed-1');
+	});
+
+	test('concurrent ensureSession calls share one provider creation', async () => {
+		const manager = new AgentSessionManager();
+		let creates = 0;
+		const provider = mockProvider('cursor');
+		provider.createSession = async (context) => {
+			creates += 1;
+			await new Promise<void>((resolve) => setTimeout(resolve, 10));
+			return createAgentSession({
+				id: context.sessionId ?? 'cursor-shared',
+				providerId: 'cursor',
+			});
+		};
+		manager.register(provider);
+
+		const [first, second] = await Promise.all([
+			manager.ensureSession('cursor', { sessionId: 'cursor-shared' }),
+			manager.ensureSession('cursor', { sessionId: 'cursor-shared' }),
+		]);
+		assert.strictEqual(creates, 1);
+		assert.strictEqual(first, second);
+	});
+
+	test('rejects concurrent prompts for the same provider', async () => {
+		const manager = new AgentSessionManager();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const provider = mockProvider('codex');
+		provider.sendPrompt = async function* (session): AsyncIterable<AgentEvent> {
+			await gate;
+			yield {
+				type: 'turn.completed',
+				sessionId: session.id,
+				timestamp: Date.now(),
+			};
+		};
+		manager.register(provider);
+		await manager.ensureSession('codex');
+
+		const first = manager.sendPrompt('first', { providerId: 'codex' })[Symbol.asyncIterator]();
+		const firstNext = first.next();
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		const second = manager.sendPrompt('second', { providerId: 'codex' })[Symbol.asyncIterator]();
+		await assert.rejects(second.next(), /already running/);
+		release();
+		await firstNext;
 	});
 });

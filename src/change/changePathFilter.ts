@@ -12,6 +12,9 @@ const IGNORED_SEGMENTS = new Set([
 	'.cursor',
 	'.venv',
 	'venv',
+	'.artifacts',
+	'.run',
+	'target',
 ]);
 
 const IGNORED_SUFFIXES = ['.map', '.vsix'];

@@ -221,7 +221,6 @@ export function toPersistedChanges(changes: ProposedChange[]): PersistedChangeRe
 export function materializeChanges(
 	records: PersistedChangeRecord[],
 	mainCwd: string,
-	shadowCwd: string,
 	deckUpdatedAt?: number,
 ): ProposedChange[] {
 	const fallbackTs = deckUpdatedAt ?? Date.now();
@@ -246,7 +245,6 @@ export function materializeChanges(
 				deletions: rev.deletions,
 				snapshotId: rev.snapshotId,
 			})),
-			shadowPath: path.join(shadowCwd, rel),
 			mainPath: path.join(mainCwd, rel),
 		};
 	});
@@ -307,18 +305,6 @@ export function listSessionDeckIds(mainCwd: string): string[] {
 		.filter((e) => e.isDirectory())
 		.map((e) => e.name);
 }
-
-export function listShadowSessionIds(mainCwd: string): string[] {
-	const dir = path.join(deckRoot(mainCwd), 'shadows');
-	if (!fs.existsSync(dir)) {
-		return [];
-	}
-	return fs
-		.readdirSync(dir, { withFileTypes: true })
-		.filter((e) => e.isDirectory() && !e.name.endsWith('.baseline'))
-		.map((e) => e.name);
-}
-
 /** Fixed ACP modes exposed in WSLDeck (intersection; no ask). */
 export const ACP_MODES: Array<{ id: AgentModeId; label: string }> = [
 	{ id: 'agent', label: 'Agent' },

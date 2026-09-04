@@ -5,6 +5,30 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-09-04
+
+### BREAKING
+
+- **移除 Shadow Workspace** — Agent 直接在 Main 工作区编辑；会话开始时记录 baseline（Git HEAD 或 `.WSLDeck/sessions/<id>/baseline/` 快照）。Diff 卡片对比 Main vs baseline；**Keep** 仅确认/收起；**Cancel** 从 baseline 恢复 Main。删除 `wsldeck.shadow.root` 设置。激活时自动删除遗留 `.WSLDeck/shadows`；可手动清理旧版 `~/.local/share/wsldeck-extension/` 目录。
+
+### 变更
+
+- **Cursor ACP 认证** — 要求先在目标 Linux / WSL 发行版运行 `agent login`；收到 `cursor_login` capability 后调用 `authenticate(cursor_login)` 加载 CLI 凭据。ACP 固定清除 `CURSOR_API_KEY` 并设置 `NO_OPEN_BROWSER=1`，不会自动拉起登录网页。
+- **Provider 生命周期** — 同一 Provider 的 session/ACP 初始化去重，同一 Provider 禁止并发 Prompt；Cursor 与 Codex 仍可维护相互独立的会话。
+
+### 修复
+
+- **Windows Shadow 创建** — （已 superseded）此前 Shadow 路径修复；现改为无 Shadow 架构。
+- **Cursor ACP 稳定性** — 修复 ACP 空闲退出后下一轮必然失败、初始化失败遗留进程、dispose 后 RPC 永久 pending，以及 Stop 重复发送 `session/cancel`。
+- **Cursor 后台运行** — 切换到另一 Provider 后，原 Provider 的回复、工具事件和错误仍写入自己的 lane，不再丢失。
+- **Cursor/Codex 并发** — 修复快速模型切换、目录预热和 Prompt 可能重复创建 session 或 ACP 进程的问题。
+- **Codex 失败判定** — 非零退出即使已有部分回答也会报告失败；环境解析或 CLI 定位失败时同步更新 session 状态。
+- **Agent Log 编码** — Windows→WSL 启动设置 `WSL_UTF8=1`，过滤纯 NUL stderr，并避免把大型 Unicode JSON 误判为 UTF-16LE。
+
+### 测试
+
+- 97 项自动化测试；新增 Provider 生命周期、并发会话、Codex 部分输出后失败、ACP pending RPC 回收、无浏览器认证环境及大型 Unicode JSON 回归覆盖。
+
 ## [0.1.3] - 2026-09-04
 
 Windows 本机 VS Code 下 Codex/Cursor 继承 WSL login shell 环境（PATH、proxy、NVM 等）。
@@ -21,6 +45,7 @@ Windows 本机 VS Code 下 Codex/Cursor 继承 WSL login shell 环境（PATH、p
 - `resolveLinuxCommand` 使用 resolved `PATH` + `bash -c command -v`，不再单独 `bash -lc` 探测
 - Cursor API key 从 resolved env / 设置读取，移除 `bash -lc printf CURSOR_API_KEY`
 
+[0.2.0]: https://github.com/ADaozz/wsl_deck_extension/releases/tag/v0.2.0
 [0.1.3]: https://github.com/ADaozz/wsl_deck_extension/releases/tag/v0.1.3
 
 ## [0.1.2] - 2026-09-04

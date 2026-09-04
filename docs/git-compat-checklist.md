@@ -4,17 +4,17 @@ Automated coverage lives in `src/test/gitCompat.test.ts`. Manual E2E on Windows 
 
 ## Must pass
 
-- [ ] `git status` shows Keep-applied files as modified (not committed by WSLDeck)
+- [ ] `git status` shows agent-edited files as modified (not committed by WSLDeck)
 - [ ] VS Code Source Control lists the same dirty files
 - [ ] Stage → Commit → Push works normally after Keep
 - [ ] WSLDeck never auto-commits or auto-pushes
 - [ ] Chinese / spaced paths: Keep + conflict gate
 - [ ] User edits Main while agent runs → Keep blocked (conflicted), Main not overwritten
-- [ ] `git reset`, `git checkout`, branch switch unaffected by shadow dirs under `~/.local/share/wsldeck-extension/`
+- [ ] `git reset`, `git checkout`, branch switch unaffected by `.WSLDeck/sessions/` metadata
 
-## Shadow isolation
+## Session baseline
 
-Agent shadows live outside the workspace (`~/.local/share/wsldeck-extension/workspaces/…`). Legacy in-repo `.WSLDeck/shadows` is removed on activation when detected.
+Agent edits Main directly. At session start WSLDeck records baseline (Git HEAD or `.WSLDeck/sessions/<id>/baseline/` snapshot). Legacy in-repo `.WSLDeck/shadows` and old `~/.local/share/wsldeck-extension/` shadow dirs are no longer used; activation removes `.WSLDeck/shadows` when detected.
 
 ## Baseline after Keep
 

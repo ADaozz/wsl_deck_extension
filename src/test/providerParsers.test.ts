@@ -9,6 +9,7 @@ import {
 } from '../agent/providers/codex/codexEvents';
 import { buildCodexExecArgs } from '../agent/providers/codex/codexProcess';
 import { parseCursorModelList, parseAcpAvailableModels } from '../agent/providers/cursor/cursorAcpClient';
+import { cursorLoginMethod } from '../agent/providers/cursor/cursorProvider';
 import {
 	acpTextChunk,
 	acpToolMutatesWorkspace,
@@ -152,6 +153,15 @@ suite('real provider parsers', () => {
 			{ id: 'composer-2', label: 'Composer 2' },
 			{ id: 'auto', label: 'Auto' },
 		]);
+	});
+
+	test('selects cursor_login only when initialize advertises it', () => {
+		assert.strictEqual(
+			cursorLoginMethod({ authMethods: [{ id: 'cursor_login' }] }),
+			'cursor_login',
+		);
+		assert.strictEqual(cursorLoginMethod({ authMethods: [{ id: 'api_key' }] }), undefined);
+		assert.strictEqual(cursorLoginMethod(undefined), undefined);
 	});
 
 	test('extracts ACP session update wrapper', () => {

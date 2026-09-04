@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { distroFromRemoteAuthority, resolveToWslPath } from './wslPathResolver';
+import { distroFromRemoteAuthority, resolveToWslPath, toWslLinuxPath } from './wslPathResolver';
 
 export type ExtensionHostKind = 'local-windows' | 'local-linux' | 'wsl-remote' | 'other-remote';
 
@@ -84,4 +84,23 @@ export function getWorkspaceContext(): WorkspaceContext {
 		distro,
 		pathKind: resolved.kind,
 	};
+}
+
+/** Path for extension-host fs/git on the current OS (Windows fsPath when local-windows). */
+export function hostFsPath(ctx: WorkspaceContext): string | undefined {
+	if (ctx.host === 'local-windows') {
+		return ctx.workspaceFsPath ?? ctx.linuxCwd;
+	}
+	return ctx.linuxCwd ?? ctx.workspaceFsPath;
+}
+
+/** Convert a host fs path to the Linux path Agent CLI should use as cwd. */
+export function agentLinuxPath(ctx: WorkspaceContext, fsPath: string): string {
+	if (!fsPath?.trim()) {
+		return fsPath;
+	}
+	if (ctx.host === 'local-windows') {
+		return toWslLinuxPath(fsPath, 'local-windows') ?? fsPath;
+	}
+	return fsPath;
 }

@@ -1,25 +1,22 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { ShadowWorkspace } from '../shadow/shadowWorkspaceManager';
+import { sessionDeckDir } from '../state/workspaceDeckStore';
+import type { SessionBaseline } from '../session/sessionBaseline';
 
 /** Per-path baseline snapshots updated after each successful Keep. */
-export function baselineOverlayRoot(shadow: ShadowWorkspace): string {
-	return path.join(
-		shadow.shadowCwd,
-		'..',
-		`${path.basename(shadow.shadowCwd)}.baseline-overlay`,
-	);
+export function baselineOverlayRoot(baseline: SessionBaseline): string {
+	return path.join(sessionDeckDir(baseline.mainCwd, baseline.sessionId), 'baseline-overlay');
 }
 
-export function baselineOverlayPath(shadow: ShadowWorkspace, relativePath: string): string {
-	return path.join(baselineOverlayRoot(shadow), relativePath.replace(/\\/g, '/'));
+export function baselineOverlayPath(baseline: SessionBaseline, relativePath: string): string {
+	return path.join(baselineOverlayRoot(baseline), relativePath.replace(/\\/g, '/'));
 }
 
 export function readBaselineOverlay(
-	shadow: ShadowWorkspace,
+	baseline: SessionBaseline,
 	relativePath: string,
 ): string | undefined {
-	const p = baselineOverlayPath(shadow, relativePath);
+	const p = baselineOverlayPath(baseline, relativePath);
 	if (!fs.existsSync(p)) {
 		return undefined;
 	}
@@ -27,18 +24,21 @@ export function readBaselineOverlay(
 }
 
 /** Marker file meaning the path was deleted at last Keep. */
-export function isBaselineOverlayDeleted(shadow: ShadowWorkspace, relativePath: string): boolean {
-	return fs.existsSync(`${baselineOverlayPath(shadow, relativePath)}.__deleted__`);
+export function isBaselineOverlayDeleted(
+	baseline: SessionBaseline,
+	relativePath: string,
+): boolean {
+	return fs.existsSync(`${baselineOverlayPath(baseline, relativePath)}.__deleted__`);
 }
 
 export function advanceBaselineOverlay(
-	shadow: ShadowWorkspace,
+	baseline: SessionBaseline,
 	relativePath: string,
-	shadowPath: string,
+	mainPath: string,
 	kind: 'added' | 'modified' | 'deleted' | 'renamed',
 ): void {
 	const rel = relativePath.replace(/\\/g, '/');
-	const root = baselineOverlayRoot(shadow);
+	const root = baselineOverlayRoot(baseline);
 	const overlayPath = path.join(root, rel);
 	const deletedMarker = `${overlayPath}.__deleted__`;
 
@@ -54,9 +54,9 @@ export function advanceBaselineOverlay(
 	if (fs.existsSync(deletedMarker)) {
 		fs.rmSync(deletedMarker, { force: true });
 	}
-	if (!fs.existsSync(shadowPath)) {
+	if (!fs.existsSync(mainPath)) {
 		return;
 	}
 	fs.mkdirSync(path.dirname(overlayPath), { recursive: true });
-	fs.copyFileSync(shadowPath, overlayPath);
+	fs.copyFileSync(mainPath, overlayPath);
 }
