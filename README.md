@@ -60,7 +60,7 @@ AI 改代码不应是黑盒。WSLDeck 在变更进入主工作区前提供 **Cha
 - **Linux/WSL 作为 Agent 执行环境**
   - **Remote-WSL**（推荐）：扩展与 CLI 均在 WSL 内
   - **Windows 本机 VS Code**：需 WSL + **打开文件夹**；Codex/Cursor 经 `wsl.exe --cd` 桥接执行（与 WSLDeck WSL 终端同一套逻辑）
-- [Codex CLI](https://github.com/openai/codex) 和/或 [Cursor CLI](https://cursor.com/docs/cli) 已加入 **WSL 内** `PATH`
+- 请确保[Codex CLI](https://github.com/openai/codex) 和/或 [Cursor CLI](https://cursor.com/docs/cli) 已加入 **WSL 内** `PATH`
 - 已打开文件夹作为工作区（Windows 路径如 `C:\project` 会自动映射为 `/mnt/c/project`）
 
 ### 从源码安装
